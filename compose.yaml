@@ -1,0 +1,20 @@
+name: crowdgate-local
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: crowdgate
+      POSTGRES_USER: ${CG_DATABASE_USER:-crowdgate}
+      POSTGRES_PASSWORD: ${CG_DATABASE_PASSWORD:?Set CG_DATABASE_PASSWORD}
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres_data:
