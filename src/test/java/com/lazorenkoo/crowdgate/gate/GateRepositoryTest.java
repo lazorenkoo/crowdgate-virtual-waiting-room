@@ -10,6 +10,8 @@ import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.containers.GenericContainer;
+import com.lazorenkoo.crowdgate.queue.QueueEntry;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import java.util.UUID;
@@ -31,11 +33,16 @@ class GateRepositoryTest {
     @Container
     static final PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:17");
 
+    @Container
+    static final GenericContainer<?> redis = new GenericContainer<>("redis:7.4").withExposedPorts(6379);
+
     @DynamicPropertySource
     static void databaseProperties(DynamicPropertyRegistry registry) {
         registry.add("spring.datasource.url", postgres::getJdbcUrl);
         registry.add("spring.datasource.username", postgres::getUsername);
         registry.add("spring.datasource.password", postgres::getPassword);
+        registry.add("spring.data.redis.host", redis::getHost);
+        registry.add("spring.data.redis.port", () -> redis.getMappedPort(6379));
     }
 
     @Autowired
@@ -47,6 +54,39 @@ class GateRepositoryTest {
     @BeforeEach
     void authenticateClient() {
         client = client.mutate().defaultHeader("X-Admin-Key", "test-admin-key").build();
+    }
+
+    @Test
+    void joinsQueueWithCookieAndReadsOwnedStatus() {
+        Gate gate = new Gate("Queue API", 10, 100, 300, 120);
+        gate.changeStatus(GateStatus.OPEN);
+        UUID id = repository.saveAndFlush(gate).getId();
+        WebTestClient publicClient = client.mutate()
+                .defaultHeaders(headers -> headers.remove("X-Admin-Key")).build();
+        String path = "/api/v1/gates/" + id + "/join";
+        var response = publicClient.post().uri(path).exchange().expectStatus().isOk()
+                .expectCookie().httpOnly("cg_user_id", true)
+                .expectCookie().sameSite("cg_user_id", "Lax")
+                .expectBody(QueueEntry.class).returnResult();
+        QueueEntry first = response.getResponseBody();
+        String cookie = response.getResponseCookies().getFirst("cg_user_id").getValue();
+        assertThat(first.status()).isEqualTo("WAITING");
+        assertThat(first.position()).isEqualTo(1);
+        publicClient.post().uri(path).cookie("cg_user_id", cookie).exchange()
+                .expectStatus().isOk().expectBody()
+                .jsonPath("$.queueToken").isEqualTo(first.queueToken())
+                .jsonPath("$.queueSize").isEqualTo(1);
+        publicClient.post().uri(path).exchange().expectStatus().isOk().expectBody()
+                .jsonPath("$.position").isEqualTo(2);
+        publicClient.get().uri("/api/v1/queue/{token}", first.queueToken())
+                .cookie("cg_user_id", cookie).exchange().expectStatus().isOk().expectBody()
+                .jsonPath("$.position").isEqualTo(1)
+                .jsonPath("$.queueSize").isEqualTo(2);
+        publicClient.get().uri("/api/v1/queue/{token}", first.queueToken())
+                .exchange().expectStatus().isNotFound();
+        publicClient.get().uri("/api/v1/queue/{token}", first.queueToken())
+                .cookie("cg_user_id", UUID.randomUUID().toString())
+                .exchange().expectStatus().isNotFound();
     }
 
     @Test
