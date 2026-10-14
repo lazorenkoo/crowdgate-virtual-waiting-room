@@ -41,6 +41,31 @@ class GateRepositoryTest {
     WebTestClient client;
 
     @Test
+    void returnsConsistentApiErrors() {
+        String path = "/api/v1/admin/gates/" + UUID.randomUUID();
+        client.get().uri(path).exchange().expectStatus().isNotFound().expectBody()
+                .jsonPath("$.status").isEqualTo(404)
+                .jsonPath("$.message").isEqualTo("Gate not found")
+                .jsonPath("$.path").isEqualTo(path);
+        client.get().uri("/unknown?secret=value").exchange().expectStatus().isNotFound()
+                .expectBody().jsonPath("$.status").isEqualTo(404)
+                .jsonPath("$.path").isEqualTo("/unknown");
+        client.delete().uri("/api/v1/admin/gates").exchange().expectStatus().isEqualTo(405)
+                .expectHeader().exists("Allow").expectBody()
+                .jsonPath("$.status").isEqualTo(405);
+        client.post().uri("/api/v1/admin/gates")
+                .header("Content-Type", "application/json").bodyValue("{broken")
+                .exchange().expectStatus().isBadRequest().expectBody()
+                .jsonPath("$.status").isEqualTo(400)
+                .jsonPath("$.message").isEqualTo("Bad Request");
+        Gate gate = repository.saveAndFlush(new Gate("Error conflict", 10, 100, 300, 120));
+        client.post().uri("/api/v1/admin/gates/{id}/pause", gate.getId())
+                .exchange().expectStatus().isEqualTo(409).expectBody()
+                .jsonPath("$.status").isEqualTo(409)
+                .jsonPath("$.message").isEqualTo("Cannot change gate from DRAFT to PAUSED");
+    }
+
+    @Test
     void runsScheduleAtBoundariesWithoutRepeatingTransitions() {
         Instant opening = Instant.parse("2030-01-01T10:00:00Z");
         Instant closing = opening.plusSeconds(60);
