@@ -41,6 +41,57 @@ class GateRepositoryTest {
     WebTestClient client;
 
     @Test
+    void runsScheduleAtBoundariesWithoutRepeatingTransitions() {
+        Instant opening = Instant.parse("2030-01-01T10:00:00Z");
+        Instant closing = opening.plusSeconds(60);
+        Gate gate = new Gate("Timed", 10, 100, 300, 120);
+        gate.setSchedule(opening, closing);
+        UUID id = repository.saveAndFlush(gate).getId();
+        GateScheduleRunner runner = new GateScheduleRunner(repository);
+
+        runner.tick(opening.minusSeconds(1));
+        assertThat(repository.findById(id).orElseThrow().getStatus()).isEqualTo(GateStatus.SCHEDULED);
+        runner.tick(opening);
+        Gate opened = repository.findById(id).orElseThrow();
+        assertThat(opened.getStatus()).isEqualTo(GateStatus.OPEN);
+        assertThat(opened.getVersion()).isEqualTo(1);
+        assertThat(opened.getUpdatedAt()).isEqualTo(opening);
+        runner.tick(opening);
+        assertThat(repository.findById(id).orElseThrow().getVersion()).isEqualTo(1);
+        opened.changeStatus(GateStatus.PAUSED);
+        repository.saveAndFlush(opened);
+        runner.tick(closing.minusSeconds(1));
+        assertThat(repository.findById(id).orElseThrow().getStatus()).isEqualTo(GateStatus.PAUSED);
+        runner.tick(closing);
+        Gate closed = repository.findById(id).orElseThrow();
+        assertThat(closed.getStatus()).isEqualTo(GateStatus.CLOSED);
+        assertThat(closed.getVersion()).isEqualTo(3);
+        runner.tick(closing.plusSeconds(60));
+        assertThat(repository.findById(id).orElseThrow().getVersion()).isEqualTo(3);
+    }
+
+    @Test
+    void skipsExpiredWindowAndRejectsSnapshotFromBeforeScheduledOpening() {
+        Instant now = Instant.parse("2031-01-01T10:00:00Z");
+        Gate missed = new Gate("Missed", 10, 100, 300, 120);
+        missed.setSchedule(now.minusSeconds(120), now.minusSeconds(60));
+        UUID missedId = repository.saveAndFlush(missed).getId();
+        Gate ready = new Gate("Ready", 10, 100, 300, 120);
+        ready.setSchedule(now, null);
+        UUID readyId = repository.saveAndFlush(ready).getId();
+        Gate snapshot = repository.findById(readyId).orElseThrow();
+
+        new GateScheduleRunner(repository).tick(now);
+        assertThat(repository.findById(missedId).orElseThrow().getStatus()).isEqualTo(GateStatus.CLOSED);
+        assertThat(repository.findById(missedId).orElseThrow().getVersion()).isEqualTo(1);
+        assertThat(repository.findById(readyId).orElseThrow().getStatus()).isEqualTo(GateStatus.OPEN);
+        snapshot.updateSettings(new CreateGateRequest("Outdated", 20, 100, 300, 120));
+        assertThatThrownBy(() -> repository.saveAndFlush(snapshot))
+                .isInstanceOf(OptimisticLockingFailureException.class);
+        assertThat(repository.findById(readyId).orElseThrow().getName()).isEqualTo("Ready");
+    }
+
+    @Test
     void configuresAndClearsSchedule() {
         Gate gate = repository.saveAndFlush(new Gate("Scheduled", 10, 100, 300, 120));
         Instant opening = Instant.now().plusSeconds(3600).truncatedTo(ChronoUnit.MICROS);
