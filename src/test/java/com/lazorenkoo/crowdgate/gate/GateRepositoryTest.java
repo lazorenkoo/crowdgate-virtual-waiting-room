@@ -57,6 +57,34 @@ class GateRepositoryTest {
     }
 
     @Test
+    void appliesGatePolicyToPublicJoin() {
+        WebTestClient publicClient = client.mutate()
+                .defaultHeaders(headers -> headers.remove("X-Admin-Key")).build();
+        Gate gate = repository.saveAndFlush(new Gate("Queue policy", 10, 100, 300, 120));
+        String path = "/api/v1/gates/" + gate.getId() + "/join";
+        publicClient.post().uri(path).exchange().expectStatus().isEqualTo(409);
+        gate.setSchedule(Instant.now().plusSeconds(3600), null);
+        gate = repository.saveAndFlush(gate);
+        publicClient.post().uri(path).exchange().expectStatus().isEqualTo(409);
+        gate.changeStatus(GateStatus.OPEN);
+        gate.changeStatus(GateStatus.PAUSED);
+        gate = repository.saveAndFlush(gate);
+        publicClient.post().uri(path).exchange().expectStatus().isOk().expectBody()
+                .jsonPath("$.status").isEqualTo("WAITING");
+        gate.changeStatus(GateStatus.CLOSED);
+        repository.saveAndFlush(gate);
+        publicClient.post().uri(path).exchange().expectStatus().isEqualTo(410);
+        Gate expired = new Gate("Expired queue", 10, 100, 300, 120);
+        expired.setSchedule(Instant.EPOCH, Instant.EPOCH.plusSeconds(60));
+        expired.changeStatus(GateStatus.OPEN);
+        UUID expiredId = repository.saveAndFlush(expired).getId();
+        publicClient.post().uri("/api/v1/gates/{id}/join", expiredId)
+                .exchange().expectStatus().isEqualTo(410);
+        publicClient.post().uri("/api/v1/gates/{id}/join", UUID.randomUUID())
+                .exchange().expectStatus().isNotFound();
+    }
+
+    @Test
     void joinsQueueWithCookieAndReadsOwnedStatus() {
         Gate gate = new Gate("Queue API", 10, 100, 300, 120);
         gate.changeStatus(GateStatus.OPEN);
