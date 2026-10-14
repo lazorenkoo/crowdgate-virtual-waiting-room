@@ -41,6 +41,25 @@ class GateRepositoryTest {
     WebTestClient client;
 
     @Test
+    void rejectsManualOpeningAfterClosingTimeBeforeSchedulerRuns() {
+        for (GateStatus status : new GateStatus[]{GateStatus.SCHEDULED, GateStatus.PAUSED}) {
+            Gate gate = new Gate("Expired " + status, 10, 100, 300, 120);
+            gate.setSchedule(Instant.EPOCH, Instant.EPOCH.plusSeconds(60));
+            if (status == GateStatus.PAUSED) {
+                gate.changeStatus(GateStatus.OPEN);
+                gate.changeStatus(GateStatus.PAUSED);
+            }
+            UUID id = repository.saveAndFlush(gate).getId();
+            client.post().uri("/api/v1/admin/gates/{id}/open", id).exchange()
+                    .expectStatus().isEqualTo(409).expectBody()
+                    .jsonPath("$.message").isEqualTo("Gate closing time has passed");
+            Gate unchanged = repository.findById(id).orElseThrow();
+            assertThat(unchanged.getStatus()).isEqualTo(status);
+            assertThat(unchanged.getVersion()).isZero();
+        }
+    }
+
+    @Test
     void returnsConsistentApiErrors() {
         String path = "/api/v1/admin/gates/" + UUID.randomUUID();
         client.get().uri(path).exchange().expectStatus().isNotFound().expectBody()
