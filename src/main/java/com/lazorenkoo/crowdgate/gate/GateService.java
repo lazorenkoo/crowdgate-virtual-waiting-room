@@ -1,6 +1,9 @@
 package com.lazorenkoo.crowdgate.gate;
 
 import org.springframework.http.HttpStatus;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Mono;
@@ -30,6 +33,19 @@ public class GateService {
         return Mono.fromCallable(() -> repository.findById(id)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Gate not found")))
                 .subscribeOn(Schedulers.boundedElastic());
+    }
+
+    public Mono<GatePage> list(int page, int size) {
+        return Mono.fromCallable(() -> {
+            if (page < 0 || size < 1 || size > 100) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "Page must be non-negative and size must be between 1 and 100");
+            }
+            PageRequest request = PageRequest.of(page, size, Sort.by("createdAt", "id"));
+            Page<Gate> result = repository.findAll(request);
+            return new GatePage(result.getContent(), result.getNumber(), result.getSize(),
+                    result.getTotalElements(), result.getTotalPages());
+        }).subscribeOn(Schedulers.boundedElastic());
     }
 
     private void validate(CreateGateRequest request) {
