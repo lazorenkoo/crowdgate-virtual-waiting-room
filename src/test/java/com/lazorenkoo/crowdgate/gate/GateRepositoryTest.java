@@ -1,6 +1,7 @@
 package com.lazorenkoo.crowdgate.gate;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -20,7 +21,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-        properties = "crowdgate.schedule.enabled=false")
+        properties = {"crowdgate.schedule.enabled=false", "crowdgate.admin.key=test-admin-key"})
 @Testcontainers
 class GateRepositoryTest {
 
@@ -39,6 +40,11 @@ class GateRepositoryTest {
 
     @Autowired
     WebTestClient client;
+
+    @BeforeEach
+    void authenticateClient() {
+        client = client.mutate().defaultHeader("X-Admin-Key", "test-admin-key").build();
+    }
 
     @Test
     void rejectsManualOpeningAfterClosingTimeBeforeSchedulerRuns() {
