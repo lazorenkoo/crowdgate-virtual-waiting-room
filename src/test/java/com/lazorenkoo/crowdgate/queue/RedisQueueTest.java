@@ -5,6 +5,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
+import org.springframework.web.server.ResponseStatusException;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
@@ -13,6 +14,7 @@ import java.time.Duration;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @Testcontainers
 class RedisQueueTest {
@@ -35,6 +37,39 @@ class RedisQueueTest {
     @AfterAll
     static void disconnect() {
         connection.destroy();
+    }
+
+    @Test
+    void readsCurrentPositionOnlyForEntryOwner() {
+        UUID gate = UUID.randomUUID();
+        UUID firstUser = UUID.randomUUID();
+        UUID secondUser = UUID.randomUUID();
+        QueueEntry first = queue.join(gate, firstUser).block(Duration.ofSeconds(5));
+        QueueEntry second = queue.join(gate, secondUser).block(Duration.ofSeconds(5));
+        QueueEntry status = queue.status(second.queueToken(), secondUser).block(Duration.ofSeconds(5));
+        assertThat(status.status()).isEqualTo("WAITING");
+        assertThat(status.position()).isEqualTo(2);
+        assertThat(status.queueSize()).isEqualTo(2);
+        template.opsForZSet().remove("cg:{" + gate + "}:waiting", first.queueToken())
+                .block(Duration.ofSeconds(5));
+        assertThat(queue.status(second.queueToken(), secondUser).block(Duration.ofSeconds(5)).position())
+                .isEqualTo(1);
+        assertThatThrownBy(() -> queue.status(second.queueToken(), firstUser).block(Duration.ofSeconds(5)))
+                .isInstanceOfSatisfying(ResponseStatusException.class,
+                        error -> assertThat(error.getStatusCode().value()).isEqualTo(404));
+        assertThatThrownBy(() -> queue.status(gate + ":" + UUID.randomUUID(), secondUser)
+                .block(Duration.ofSeconds(5))).isInstanceOfSatisfying(ResponseStatusException.class,
+                        error -> assertThat(error.getStatusCode().value()).isEqualTo(404));
+    }
+
+    @Test
+    void rejectsMalformedQueueTokens() {
+        for (String token : new String[]{"invalid", "1-1-1-1-1:" + UUID.randomUUID(),
+                UUID.randomUUID() + ":invalid", UUID.randomUUID() + ":" + UUID.randomUUID() + ":extra"}) {
+            assertThatThrownBy(() -> queue.status(token, UUID.randomUUID()).block(Duration.ofSeconds(5)))
+                    .isInstanceOfSatisfying(ResponseStatusException.class,
+                            error -> assertThat(error.getStatusCode().value()).isEqualTo(400));
+        }
     }
 
     @Test
