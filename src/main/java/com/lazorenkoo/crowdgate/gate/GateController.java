@@ -45,4 +45,19 @@ public class GateController {
     public Mono<Gate> update(@PathVariable UUID id, @RequestBody UpdateGateRequest request) {
         return service.update(id, request);
     }
+
+    @PostMapping("/{id}/open")
+    public Mono<Gate> open(@PathVariable UUID id) {
+        return service.changeStatus(id, GateStatus.OPEN);
+    }
+
+    @PostMapping("/{id}/pause")
+    public Mono<Gate> pause(@PathVariable UUID id) {
+        return service.changeStatus(id, GateStatus.PAUSED);
+    }
+
+    @PostMapping("/{id}/close")
+    public Mono<Gate> close(@PathVariable UUID id) {
+        return service.changeStatus(id, GateStatus.CLOSED);
+    }
 }

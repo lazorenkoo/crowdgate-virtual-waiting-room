@@ -81,6 +81,23 @@ public class Gate {
         tokenTtlSeconds = settings.tokenTtlSeconds();
     }
 
+    public void changeStatus(GateStatus target) {
+        if (status == target) {
+            return;
+        }
+        boolean allowed = switch (target) {
+            case OPEN -> status == GateStatus.DRAFT || status == GateStatus.SCHEDULED
+                    || status == GateStatus.PAUSED;
+            case PAUSED -> status == GateStatus.OPEN;
+            case CLOSED -> true;
+            default -> false;
+        };
+        if (!allowed) {
+            throw new GateTransitionException(status, target);
+        }
+        status = target;
+    }
+
     @PreUpdate
     void setUpdateTime() {
         updatedAt = Instant.now();

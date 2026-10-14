@@ -77,4 +77,17 @@ public class GateService {
                 .onErrorMap(OptimisticLockingFailureException.class, error ->
                         new ResponseStatusException(HttpStatus.CONFLICT, "Gate has changed"));
     }
+
+    public Mono<Gate> changeStatus(UUID id, GateStatus target) {
+        return Mono.fromCallable(() -> {
+            Gate gate = repository.findById(id).orElseThrow(() ->
+                    new ResponseStatusException(HttpStatus.NOT_FOUND, "Gate not found"));
+            gate.changeStatus(target);
+            return repository.saveAndFlush(gate);
+        }).subscribeOn(Schedulers.boundedElastic())
+                .onErrorMap(GateTransitionException.class, error ->
+                        new ResponseStatusException(HttpStatus.CONFLICT, error.getMessage()))
+                .onErrorMap(OptimisticLockingFailureException.class, error ->
+                        new ResponseStatusException(HttpStatus.CONFLICT, "Gate has changed"));
+    }
 }
