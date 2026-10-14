@@ -47,6 +47,34 @@ class GateRepositoryTest {
     }
 
     @Test
+    void requiresAdminKeyBeforeReadingOrWritingGates() {
+        WebTestClient anonymous = client.mutate()
+                .defaultHeaders(headers -> headers.remove("X-Admin-Key")).build();
+        long count = repository.count();
+        anonymous.get().uri("/api/v1/admin/gates").exchange()
+                .expectStatus().isUnauthorized().expectBody()
+                .jsonPath("$.status").isEqualTo(401)
+                .jsonPath("$.message").isEqualTo("Admin key is required")
+                .jsonPath("$.path").isEqualTo("/api/v1/admin/gates");
+        anonymous.post().uri("/api/v1/admin/gates")
+                .bodyValue(new CreateGateRequest("Unauthorized", 10, 100, 300, 120))
+                .exchange().expectStatus().isUnauthorized();
+        anonymous.get().uri("/api/v1/admin/gates").header("X-Admin-Key", "wrong-key")
+                .exchange().expectStatus().isUnauthorized();
+        assertThat(repository.count()).isEqualTo(count);
+        client.get().uri("/api/v1/admin/gates").exchange().expectStatus().isOk();
+    }
+
+    @Test
+    void appliesAdminAccessToUnknownAdminRoutesOnly() {
+        WebTestClient anonymous = client.mutate()
+                .defaultHeaders(headers -> headers.remove("X-Admin-Key")).build();
+        anonymous.get().uri("/api/v1/admin").exchange().expectStatus().isUnauthorized();
+        anonymous.get().uri("/api/v1/admin/unknown").exchange().expectStatus().isUnauthorized();
+        anonymous.get().uri("/api/v1/admin-other").exchange().expectStatus().isNotFound();
+    }
+
+    @Test
     void rejectsManualOpeningAfterClosingTimeBeforeSchedulerRuns() {
         for (GateStatus status : new GateStatus[]{GateStatus.SCHEDULED, GateStatus.PAUSED}) {
             Gate gate = new Gate("Expired " + status, 10, 100, 300, 120);
