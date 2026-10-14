@@ -16,6 +16,9 @@ import java.util.UUID;
 import java.util.Map;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -44,6 +47,56 @@ class GateRepositoryTest {
     @BeforeEach
     void authenticateClient() {
         client = client.mutate().defaultHeader("X-Admin-Key", "test-admin-key").build();
+    }
+
+    @Test
+    void parallelSchedulersApplyEachTransitionOnce() throws Exception {
+        Instant now = Instant.parse("2032-01-01T10:00:00Z");
+        Gate ready = new Gate("Parallel opening", 10, 100, 300, 120);
+        ready.setSchedule(now, now.plusSeconds(60));
+        UUID readyId = repository.saveAndFlush(ready).getId();
+        Gate expired = new Gate("Parallel closing", 10, 100, 300, 120);
+        expired.setSchedule(now.minusSeconds(120), now.minusSeconds(60));
+        UUID expiredId = repository.saveAndFlush(expired).getId();
+        CountDownLatch waiting = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        var executor = Executors.newFixedThreadPool(2);
+        try {
+            var first = executor.submit(() -> {
+                waiting.countDown();
+                if (!start.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Scheduler start timed out");
+                }
+                new GateScheduleRunner(repository).tick(now);
+                return null;
+            });
+            var second = executor.submit(() -> {
+                waiting.countDown();
+                if (!start.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Scheduler start timed out");
+                }
+                new GateScheduleRunner(repository).tick(now);
+                return null;
+            });
+            assertThat(waiting.await(5, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+            first.get(10, TimeUnit.SECONDS);
+            second.get(10, TimeUnit.SECONDS);
+        } finally {
+            start.countDown();
+            executor.shutdownNow();
+        }
+        Gate opened = repository.findById(readyId).orElseThrow();
+        Gate closed = repository.findById(expiredId).orElseThrow();
+        assertThat(opened.getStatus()).isEqualTo(GateStatus.OPEN);
+        assertThat(opened.getVersion()).isEqualTo(1);
+        assertThat(closed.getStatus()).isEqualTo(GateStatus.CLOSED);
+        assertThat(closed.getVersion()).isEqualTo(1);
+        opened.changeStatus(GateStatus.PAUSED);
+        repository.saveAndFlush(opened);
+        new GateScheduleRunner(repository).tick(now);
+        assertThat(repository.findById(readyId).orElseThrow().getStatus()).isEqualTo(GateStatus.PAUSED);
+        assertThat(repository.findById(expiredId).orElseThrow().getVersion()).isEqualTo(1);
     }
 
     @Test
