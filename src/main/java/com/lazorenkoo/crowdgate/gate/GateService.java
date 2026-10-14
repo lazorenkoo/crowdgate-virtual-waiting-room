@@ -83,6 +83,10 @@ public class GateService {
         return Mono.fromCallable(() -> {
             Gate gate = repository.findById(id).orElseThrow(() ->
                     new ResponseStatusException(HttpStatus.NOT_FOUND, "Gate not found"));
+            if (target == GateStatus.OPEN && gate.getClosesAt() != null
+                    && !gate.getClosesAt().isAfter(Instant.now())) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "Gate closing time has passed");
+            }
             gate.changeStatus(target);
             return repository.saveAndFlush(gate);
         }).subscribeOn(Schedulers.boundedElastic())
