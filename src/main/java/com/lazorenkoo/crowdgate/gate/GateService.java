@@ -1,6 +1,7 @@
 package com.lazorenkoo.crowdgate.gate;
 
 import org.springframework.http.HttpStatus;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
@@ -56,5 +57,24 @@ public class GateService {
                 || request.sessionTtlSeconds() <= 0 || request.tokenTtlSeconds() <= 0) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Gate limits and TTL must be positive");
         }
+    }
+
+    public Mono<Gate> update(UUID id, UpdateGateRequest request) {
+        return Mono.fromCallable(() -> {
+            if (request.version() == null || request.version() < 0) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Version is required");
+            }
+            Gate gate = repository.findById(id).orElseThrow(() ->
+                    new ResponseStatusException(HttpStatus.NOT_FOUND, "Gate not found"));
+            if (gate.getVersion() != request.version()) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "Gate has changed");
+            }
+            CreateGateRequest settings = request.merge(gate);
+            validate(settings);
+            gate.updateSettings(settings);
+            return repository.saveAndFlush(gate);
+        }).subscribeOn(Schedulers.boundedElastic())
+                .onErrorMap(OptimisticLockingFailureException.class, error ->
+                        new ResponseStatusException(HttpStatus.CONFLICT, "Gate has changed"));
     }
 }

@@ -73,6 +73,14 @@ public class Gate {
         updatedAt = now;
     }
 
+    public void updateSettings(CreateGateRequest settings) {
+        name = settings.name().trim();
+        admissionRate = settings.admissionRate();
+        maxActiveUsers = settings.maxActiveUsers();
+        sessionTtlSeconds = settings.sessionTtlSeconds();
+        tokenTtlSeconds = settings.tokenTtlSeconds();
+    }
+
     @PreUpdate
     void setUpdateTime() {
         updatedAt = Instant.now();

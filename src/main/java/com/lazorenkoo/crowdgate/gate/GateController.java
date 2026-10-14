@@ -2,6 +2,7 @@ package com.lazorenkoo.crowdgate.gate;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -38,5 +39,10 @@ public class GateController {
     public Mono<GatePage> list(@RequestParam(defaultValue = "0") int page,
                                @RequestParam(defaultValue = "20") int size) {
         return service.list(page, size);
+    }
+
+    @PatchMapping("/{id}")
+    public Mono<Gate> update(@PathVariable UUID id, @RequestBody UpdateGateRequest request) {
+        return service.update(id, request);
     }
 }
