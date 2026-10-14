@@ -1,0 +1,21 @@
+CREATE TABLE gates (
+    id UUID PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    status VARCHAR(255) NOT NULL,
+    opens_at TIMESTAMP(6) WITH TIME ZONE,
+    closes_at TIMESTAMP(6) WITH TIME ZONE,
+    admission_rate INTEGER NOT NULL,
+    max_active_users INTEGER NOT NULL,
+    session_ttl_seconds INTEGER NOT NULL,
+    token_ttl_seconds INTEGER NOT NULL,
+    created_at TIMESTAMP(6) WITH TIME ZONE NOT NULL,
+    updated_at TIMESTAMP(6) WITH TIME ZONE NOT NULL,
+    version BIGINT NOT NULL,
+    CONSTRAINT gates_name_not_blank CHECK (length(trim(name)) > 0),
+    CONSTRAINT gates_status_valid CHECK (status IN ('DRAFT', 'SCHEDULED', 'OPEN', 'PAUSED', 'CLOSED')),
+    CONSTRAINT gates_admission_rate_positive CHECK (admission_rate > 0),
+    CONSTRAINT gates_max_active_users_positive CHECK (max_active_users > 0),
+    CONSTRAINT gates_session_ttl_positive CHECK (session_ttl_seconds > 0),
+    CONSTRAINT gates_token_ttl_positive CHECK (token_ttl_seconds > 0),
+    CONSTRAINT gates_schedule_valid CHECK (closes_at IS NULL OR opens_at IS NULL OR closes_at > opens_at)
+);
