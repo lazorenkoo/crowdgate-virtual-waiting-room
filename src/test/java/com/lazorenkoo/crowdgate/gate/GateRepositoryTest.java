@@ -37,6 +37,47 @@ class GateRepositoryTest {
     WebTestClient client;
 
     @Test
+    void listsGatesInSeparatePages() {
+        repository.deleteAll();
+        Gate first = repository.saveAndFlush(new Gate("First", 10, 100, 300, 120));
+        Gate second = repository.saveAndFlush(new Gate("Second", 10, 100, 300, 120));
+        Gate third = repository.saveAndFlush(new Gate("Third", 10, 100, 300, 120));
+
+        client.get().uri("/api/v1/admin/gates?page=0&size=2").exchange()
+                .expectStatus().isOk().expectBody()
+                .jsonPath("$.items.length()").isEqualTo(2)
+                .jsonPath("$.items[0].id").isEqualTo(first.getId().toString())
+                .jsonPath("$.items[1].id").isEqualTo(second.getId().toString())
+                .jsonPath("$.page").isEqualTo(0)
+                .jsonPath("$.size").isEqualTo(2)
+                .jsonPath("$.totalItems").isEqualTo(3)
+                .jsonPath("$.totalPages").isEqualTo(2);
+        client.get().uri("/api/v1/admin/gates?page=1&size=2").exchange()
+                .expectStatus().isOk().expectBody()
+                .jsonPath("$.items.length()").isEqualTo(1)
+                .jsonPath("$.items[0].id").isEqualTo(third.getId().toString())
+                .jsonPath("$.totalItems").isEqualTo(3);
+        client.get().uri("/api/v1/admin/gates?page=2&size=2").exchange()
+                .expectStatus().isOk().expectBody()
+                .jsonPath("$.items.length()").isEqualTo(0)
+                .jsonPath("$.totalItems").isEqualTo(3);
+        client.get().uri("/api/v1/admin/gates").exchange()
+                .expectStatus().isOk().expectBody()
+                .jsonPath("$.page").isEqualTo(0)
+                .jsonPath("$.size").isEqualTo(20)
+                .jsonPath("$.items.length()").isEqualTo(3);
+    }
+
+    @Test
+    void rejectsInvalidPageParameters() {
+        String[] queries = {"page=-1", "size=0", "size=101", "page=invalid"};
+        for (String query : queries) {
+            client.get().uri("/api/v1/admin/gates?" + query).exchange()
+                    .expectStatus().isBadRequest();
+        }
+    }
+
+    @Test
     void createsAndReadsGateThroughApi() {
         CreateGateRequest request = new CreateGateRequest(" API launch ", 10, 100, 300, 120);
         Map<?, ?> response = client.post().uri("/api/v1/admin/gates").bodyValue(request)
