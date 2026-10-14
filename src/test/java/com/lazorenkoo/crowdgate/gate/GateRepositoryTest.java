@@ -38,6 +38,53 @@ class GateRepositoryTest {
     WebTestClient client;
 
     @Test
+    void followsGateLifecycleAndKeepsRepeatedCommandsIdempotent() {
+        Gate gate = repository.saveAndFlush(new Gate("Lifecycle", 10, 100, 300, 120));
+        String[] commands = {"open", "pause", "open", "close"};
+        String[] statuses = {"OPEN", "PAUSED", "OPEN", "CLOSED"};
+        for (int index = 0; index < commands.length; index++) {
+            String path = "/api/v1/admin/gates/" + gate.getId() + "/" + commands[index];
+            client.post().uri(path).exchange().expectStatus().isOk().expectBody()
+                    .jsonPath("$.status").isEqualTo(statuses[index])
+                    .jsonPath("$.version").isEqualTo(index + 1);
+            client.post().uri(path).exchange().expectStatus().isOk().expectBody()
+                    .jsonPath("$.status").isEqualTo(statuses[index])
+                    .jsonPath("$.version").isEqualTo(index + 1);
+        }
+        client.post().uri("/api/v1/admin/gates/{id}/open", gate.getId())
+                .exchange().expectStatus().isEqualTo(409);
+        client.post().uri("/api/v1/admin/gates/{id}/pause", gate.getId())
+                .exchange().expectStatus().isEqualTo(409);
+        Gate closed = repository.findById(gate.getId()).orElseThrow();
+        assertThat(closed.getStatus()).isEqualTo(GateStatus.CLOSED);
+        assertThat(closed.getVersion()).isEqualTo(4);
+    }
+
+    @Test
+    void rejectsPauseBeforeOpeningAndMissingGateCommands() {
+        Gate gate = repository.saveAndFlush(new Gate("Draft", 10, 100, 300, 120));
+        client.post().uri("/api/v1/admin/gates/{id}/pause", gate.getId())
+                .exchange().expectStatus().isEqualTo(409);
+        Gate draft = repository.findById(gate.getId()).orElseThrow();
+        assertThat(draft.getStatus()).isEqualTo(GateStatus.DRAFT);
+        assertThat(draft.getVersion()).isZero();
+        for (String command : new String[]{"open", "pause", "close"}) {
+            client.post().uri("/api/v1/admin/gates/" + UUID.randomUUID() + "/" + command)
+                    .exchange().expectStatus().isNotFound();
+        }
+    }
+
+    @Test
+    void closesDraftWithoutOpeningIt() {
+        Gate gate = repository.saveAndFlush(new Gate("Cancelled launch", 10, 100, 300, 120));
+        client.post().uri("/api/v1/admin/gates/{id}/close", gate.getId())
+                .exchange().expectStatus().isOk().expectBody()
+                .jsonPath("$.status").isEqualTo("CLOSED");
+        assertThat(repository.findById(gate.getId()).orElseThrow().getStatus())
+                .isEqualTo(GateStatus.CLOSED);
+    }
+
+    @Test
     void updatesSettingsWithoutOverwritingOtherFields() {
         Gate original = repository.saveAndFlush(new Gate("Original", 10, 100, 300, 120));
         original = repository.findById(original.getId()).orElseThrow();
