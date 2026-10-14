@@ -11,6 +11,7 @@ import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
 import java.util.UUID;
+import java.time.Instant;
 
 @Service
 public class GateService {
@@ -83,6 +84,33 @@ public class GateService {
             Gate gate = repository.findById(id).orElseThrow(() ->
                     new ResponseStatusException(HttpStatus.NOT_FOUND, "Gate not found"));
             gate.changeStatus(target);
+            return repository.saveAndFlush(gate);
+        }).subscribeOn(Schedulers.boundedElastic())
+                .onErrorMap(GateTransitionException.class, error ->
+                        new ResponseStatusException(HttpStatus.CONFLICT, error.getMessage()))
+                .onErrorMap(OptimisticLockingFailureException.class, error ->
+                        new ResponseStatusException(HttpStatus.CONFLICT, "Gate has changed"));
+    }
+
+    public Mono<Gate> schedule(UUID id, GateScheduleRequest request) {
+        return Mono.fromCallable(() -> {
+            if (request.version() == null || request.version() < 0) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Version is required");
+            }
+            Instant now = Instant.now();
+            if (request.opensAt() != null && !request.opensAt().isAfter(now)) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Opening must be in the future");
+            }
+            if (request.closesAt() != null && (!request.closesAt().isAfter(now)
+                    || request.opensAt() != null && !request.closesAt().isAfter(request.opensAt()))) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Closing must follow opening");
+            }
+            Gate gate = repository.findById(id).orElseThrow(() ->
+                    new ResponseStatusException(HttpStatus.NOT_FOUND, "Gate not found"));
+            if (gate.getVersion() != request.version()) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "Gate has changed");
+            }
+            gate.setSchedule(request.opensAt(), request.closesAt());
             return repository.saveAndFlush(gate);
         }).subscribeOn(Schedulers.boundedElastic())
                 .onErrorMap(GateTransitionException.class, error ->

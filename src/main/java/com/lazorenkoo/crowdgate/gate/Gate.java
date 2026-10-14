@@ -98,6 +98,15 @@ public class Gate {
         status = target;
     }
 
+    public void setSchedule(Instant opening, Instant closing) {
+        if (status != GateStatus.DRAFT && status != GateStatus.SCHEDULED) {
+            throw new GateTransitionException(status, GateStatus.SCHEDULED);
+        }
+        opensAt = opening;
+        closesAt = closing;
+        status = opening == null ? GateStatus.DRAFT : GateStatus.SCHEDULED;
+    }
+
     @PreUpdate
     void setUpdateTime() {
         updatedAt = Instant.now();
