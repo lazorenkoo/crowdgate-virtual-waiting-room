@@ -6,14 +6,17 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.web.reactive.server.WebTestClient;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import java.util.UUID;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-@SpringBootTest
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Testcontainers
 class GateRepositoryTest {
 
@@ -29,6 +32,41 @@ class GateRepositoryTest {
 
     @Autowired
     GateRepository repository;
+
+    @Autowired
+    WebTestClient client;
+
+    @Test
+    void createsAndReadsGateThroughApi() {
+        CreateGateRequest request = new CreateGateRequest(" API launch ", 10, 100, 300, 120);
+        Map<?, ?> response = client.post().uri("/api/v1/admin/gates").bodyValue(request)
+                .exchange().expectStatus().isCreated()
+                .expectBody(Map.class).returnResult().getResponseBody();
+        assertThat(response).isNotNull();
+        assertThat(response.get("name")).isEqualTo("API launch");
+        assertThat(response.get("status")).isEqualTo("DRAFT");
+        UUID id = UUID.fromString((String) response.get("id"));
+        assertThat(repository.findById(id)).isPresent();
+
+        client.get().uri("/api/v1/admin/gates/{id}", id).exchange()
+                .expectStatus().isOk().expectBody()
+                .jsonPath("$.id").isEqualTo(id.toString())
+                .jsonPath("$.admissionRate").isEqualTo(10)
+                .jsonPath("$.sessionTtlSeconds").isEqualTo(300);
+    }
+
+    @Test
+    void rejectsInvalidApiRequests() {
+        long count = repository.count();
+        client.post().uri("/api/v1/admin/gates")
+                .bodyValue(new CreateGateRequest("Launch", 0, 100, 300, 120))
+                .exchange().expectStatus().isBadRequest();
+        client.get().uri("/api/v1/admin/gates/{id}", UUID.randomUUID())
+                .exchange().expectStatus().isNotFound();
+        client.get().uri("/api/v1/admin/gates/not-a-uuid")
+                .exchange().expectStatus().isBadRequest();
+        assertThat(repository.count()).isEqualTo(count);
+    }
 
     @Test
     void savesAndReadsGate() {
