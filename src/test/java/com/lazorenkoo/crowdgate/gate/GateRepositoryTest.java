@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.test.web.reactive.server.WebTestClient;
@@ -35,6 +36,70 @@ class GateRepositoryTest {
 
     @Autowired
     WebTestClient client;
+
+    @Test
+    void updatesSettingsWithoutOverwritingOtherFields() {
+        Gate original = repository.saveAndFlush(new Gate("Original", 10, 100, 300, 120));
+        original = repository.findById(original.getId()).orElseThrow();
+        UpdateGateRequest request = new UpdateGateRequest(0L, " Renamed ", 25, null, null, null);
+        client.patch().uri("/api/v1/admin/gates/{id}", original.getId()).bodyValue(request)
+                .exchange().expectStatus().isOk().expectBody()
+                .jsonPath("$.name").isEqualTo("Renamed")
+                .jsonPath("$.admissionRate").isEqualTo(25)
+                .jsonPath("$.maxActiveUsers").isEqualTo(100)
+                .jsonPath("$.sessionTtlSeconds").isEqualTo(300)
+                .jsonPath("$.tokenTtlSeconds").isEqualTo(120)
+                .jsonPath("$.status").isEqualTo("DRAFT")
+                .jsonPath("$.version").isEqualTo(1);
+        Gate updated = repository.findById(original.getId()).orElseThrow();
+        assertThat(updated.getCreatedAt()).isEqualTo(original.getCreatedAt());
+        assertThat(updated.getUpdatedAt()).isAfterOrEqualTo(updated.getCreatedAt());
+
+        client.patch().uri("/api/v1/admin/gates/{id}", original.getId())
+                .bodyValue(new UpdateGateRequest(0L, "Stale", null, null, null, null))
+                .exchange().expectStatus().isEqualTo(409);
+        Gate unchanged = repository.findById(original.getId()).orElseThrow();
+        assertThat(unchanged.getName()).isEqualTo("Renamed");
+        assertThat(unchanged.getVersion()).isEqualTo(1);
+    }
+
+    @Test
+    void rejectsInvalidSettingsUpdates() {
+        Gate gate = repository.saveAndFlush(new Gate("Valid", 10, 100, 300, 120));
+        UpdateGateRequest[] invalid = {
+                new UpdateGateRequest(null, "Changed", null, null, null, null),
+                new UpdateGateRequest(-1L, null, null, null, null, null),
+                new UpdateGateRequest(0L, " ", null, null, null, null),
+                new UpdateGateRequest(0L, null, null, 0, null, null),
+                new UpdateGateRequest(0L, null, null, null, null, -1)
+        };
+        for (UpdateGateRequest request : invalid) {
+            client.patch().uri("/api/v1/admin/gates/{id}", gate.getId()).bodyValue(request)
+                    .exchange().expectStatus().isBadRequest();
+        }
+        client.patch().uri("/api/v1/admin/gates/{id}", UUID.randomUUID())
+                .bodyValue(new UpdateGateRequest(0L, "Missing", null, null, null, null))
+                .exchange().expectStatus().isNotFound();
+        Gate unchanged = repository.findById(gate.getId()).orElseThrow();
+        assertThat(unchanged.getName()).isEqualTo("Valid");
+        assertThat(unchanged.getVersion()).isZero();
+    }
+
+    @Test
+    void preventsAnOlderCopyFromOverwritingNewSettings() {
+        Gate saved = repository.saveAndFlush(new Gate("Original", 10, 100, 300, 120));
+        Gate first = repository.findById(saved.getId()).orElseThrow();
+        Gate second = repository.findById(saved.getId()).orElseThrow();
+        first.updateSettings(new CreateGateRequest("Winner", 20, 100, 300, 120));
+        repository.saveAndFlush(first);
+        second.updateSettings(new CreateGateRequest("Stale", 30, 100, 300, 120));
+
+        assertThatThrownBy(() -> repository.saveAndFlush(second))
+                .isInstanceOf(OptimisticLockingFailureException.class);
+        Gate result = repository.findById(saved.getId()).orElseThrow();
+        assertThat(result.getName()).isEqualTo("Winner");
+        assertThat(result.getAdmissionRate()).isEqualTo(20);
+    }
 
     @Test
     void listsGatesInSeparatePages() {
