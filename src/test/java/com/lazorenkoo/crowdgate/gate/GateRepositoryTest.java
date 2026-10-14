@@ -13,6 +13,8 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import java.util.UUID;
 import java.util.Map;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -36,6 +38,55 @@ class GateRepositoryTest {
 
     @Autowired
     WebTestClient client;
+
+    @Test
+    void configuresAndClearsSchedule() {
+        Gate gate = repository.saveAndFlush(new Gate("Scheduled", 10, 100, 300, 120));
+        Instant opening = Instant.now().plusSeconds(3600).truncatedTo(ChronoUnit.MICROS);
+        Instant closing = opening.plusSeconds(3600);
+        GateScheduleRequest request = new GateScheduleRequest(0L, opening, closing);
+        String path = "/api/v1/admin/gates/" + gate.getId() + "/schedule";
+        client.put().uri(path).bodyValue(request).exchange().expectStatus().isOk()
+                .expectBody().jsonPath("$.status").isEqualTo("SCHEDULED")
+                .jsonPath("$.version").isEqualTo(1);
+        Gate scheduled = repository.findById(gate.getId()).orElseThrow();
+        assertThat(scheduled.getOpensAt()).isEqualTo(opening);
+        assertThat(scheduled.getClosesAt()).isEqualTo(closing);
+        client.put().uri(path).bodyValue(request).exchange().expectStatus().isEqualTo(409);
+        client.put().uri(path).bodyValue(new GateScheduleRequest(1L, null, null))
+                .exchange().expectStatus().isOk().expectBody()
+                .jsonPath("$.status").isEqualTo("DRAFT");
+        Gate cleared = repository.findById(gate.getId()).orElseThrow();
+        assertThat(cleared.getOpensAt()).isNull();
+        assertThat(cleared.getClosesAt()).isNull();
+        assertThat(cleared.getVersion()).isEqualTo(2);
+    }
+
+    @Test
+    void rejectsInvalidSchedulesAndRunningGateChanges() {
+        Gate gate = repository.saveAndFlush(new Gate("Schedule validation", 10, 100, 300, 120));
+        Instant future = Instant.now().plusSeconds(3600);
+        GateScheduleRequest[] invalid = {
+                new GateScheduleRequest(null, future, null),
+                new GateScheduleRequest(0L, Instant.EPOCH, null),
+                new GateScheduleRequest(0L, future, future),
+                new GateScheduleRequest(0L, future, future.minusSeconds(1)),
+                new GateScheduleRequest(0L, null, Instant.EPOCH)
+        };
+        String path = "/api/v1/admin/gates/" + gate.getId() + "/schedule";
+        for (GateScheduleRequest request : invalid) {
+            client.put().uri(path).bodyValue(request).exchange().expectStatus().isBadRequest();
+        }
+        assertThat(repository.findById(gate.getId()).orElseThrow().getVersion()).isZero();
+        client.put().uri("/api/v1/admin/gates/{id}/schedule", UUID.randomUUID())
+                .bodyValue(new GateScheduleRequest(0L, future, null))
+                .exchange().expectStatus().isNotFound();
+        client.post().uri("/api/v1/admin/gates/{id}/open", gate.getId())
+                .exchange().expectStatus().isOk();
+        client.put().uri(path).bodyValue(new GateScheduleRequest(1L, future, null))
+                .exchange().expectStatus().isEqualTo(409);
+        assertThat(repository.findById(gate.getId()).orElseThrow().getStatus()).isEqualTo(GateStatus.OPEN);
+    }
 
     @Test
     void followsGateLifecycleAndKeepsRepeatedCommandsIdempotent() {
