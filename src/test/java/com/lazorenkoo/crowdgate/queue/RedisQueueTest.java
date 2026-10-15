@@ -42,6 +42,52 @@ class RedisQueueTest {
     }
 
     @Test
+    void validatesSessionOwnerExpiryAndActiveStateWithoutRenewal() {
+        UUID gate = UUID.randomUUID();
+        UUID user = UUID.randomUUID();
+        QueueEntry entry = queue.join(gate, user).block(Duration.ofSeconds(5));
+        queue.admit(gate, 1, 1, 60).block(Duration.ofSeconds(5));
+        queue.redeem(entry.queueToken(), user, 60).block(Duration.ofSeconds(5));
+        QueueSession session = queue.issueSession(entry.queueToken(), user).block(Duration.ofSeconds(5));
+        assertThat(queue.validateSession(session.sessionToken(), user).block(Duration.ofSeconds(5)))
+                .isEqualTo(session);
+        queue.close(gate).block(Duration.ofSeconds(5));
+        assertThat(queue.validateSession(session.sessionToken(), user).block(Duration.ofSeconds(5)))
+                .isEqualTo(session);
+        assertThatThrownBy(() -> queue.validateSession(session.sessionToken(), UUID.randomUUID())
+                .block(Duration.ofSeconds(5))).isInstanceOfSatisfying(ResponseStatusException.class,
+                        error -> assertThat(error.getStatusCode().value()).isEqualTo(401));
+        String prefix = "cg:{" + gate + "}:";
+        template.opsForHash().put(prefix + "statuses", entry.queueToken(), "EXPIRED")
+                .block(Duration.ofSeconds(5));
+        assertThatThrownBy(() -> queue.validateSession(session.sessionToken(), user).block(Duration.ofSeconds(5)))
+                .isInstanceOfSatisfying(ResponseStatusException.class,
+                        error -> assertThat(error.getStatusCode().value()).isEqualTo(401));
+        template.opsForHash().put(prefix + "statuses", entry.queueToken(), "ACTIVE")
+                .block(Duration.ofSeconds(5));
+        template.opsForZSet().add(prefix + "active", entry.queueToken(), 0).block(Duration.ofSeconds(5));
+        assertThatThrownBy(() -> queue.validateSession(session.sessionToken(), user).block(Duration.ofSeconds(5)))
+                .isInstanceOfSatisfying(ResponseStatusException.class,
+                        error -> assertThat(error.getStatusCode().value()).isEqualTo(401));
+    }
+
+    @Test
+    void rejectsMalformedAndUnknownSessionCredentials() {
+        UUID user = UUID.randomUUID();
+        String secret = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(new byte[32]);
+        String canonical = UUID.randomUUID() + ":" + secret;
+        for (String token : new String[]{null, "invalid", "1-1-1-1-1:" + secret,
+                canonical + "=", canonical + ":extra", canonical,
+                UUID.randomUUID() + ":" + secret.substring(0, 42) + "B"}) {
+            assertThatThrownBy(() -> queue.validateSession(token, user).block(Duration.ofSeconds(5)))
+                    .isInstanceOfSatisfying(ResponseStatusException.class, error -> {
+                        assertThat(error.getStatusCode().value()).isEqualTo(401);
+                        assertThat(error.getReason()).isEqualTo("Invalid session");
+                    });
+        }
+    }
+
+    @Test
     void issuesSessionOnlyForOwnerOfLiveActiveEntry() {
         UUID gate = UUID.randomUUID();
         UUID user = UUID.randomUUID();
