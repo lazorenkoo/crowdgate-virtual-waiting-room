@@ -57,6 +57,28 @@ class GateRepositoryTest {
     }
 
     @Test
+    void manualCloseCancelsPublicQueueBeforeReturning() {
+        Gate gate = new Gate("Manual queue close", 10, 100, 300, 120);
+        gate.changeStatus(GateStatus.OPEN);
+        UUID id = repository.saveAndFlush(gate).getId();
+        String user = UUID.randomUUID().toString();
+        QueueEntry entry = client.post().uri("/api/v1/gates/{id}/join", id)
+                .cookie("cg_user_id", user).exchange().expectStatus().isOk()
+                .expectBody(QueueEntry.class).returnResult().getResponseBody();
+        client.post().uri("/api/v1/admin/gates/{id}/close", id).exchange()
+                .expectStatus().isOk().expectBody().returnResult();
+        client.get().uri("/api/v1/queue/{token}", entry.queueToken()).cookie("cg_user_id", user)
+                .exchange().expectStatus().isOk().expectBody()
+                .jsonPath("$.status").isEqualTo("CANCELLED")
+                .jsonPath("$.position").isEqualTo(0)
+                .jsonPath("$.queueSize").isEqualTo(0);
+        client.post().uri("/api/v1/admin/gates/{id}/close", id).exchange()
+                .expectStatus().isOk().expectBody().returnResult();
+        client.post().uri("/api/v1/gates/{id}/join", id).exchange()
+                .expectStatus().isEqualTo(410).expectBody().returnResult();
+    }
+
+    @Test
     void appliesGatePolicyToPublicJoin() {
         WebTestClient publicClient = client.mutate()
                 .defaultHeaders(headers -> headers.remove("X-Admin-Key")).build();
