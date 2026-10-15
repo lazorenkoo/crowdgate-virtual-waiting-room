@@ -23,6 +23,7 @@ public class RedisQueue {
     private final DefaultRedisScript<List> admitScript;
     private final DefaultRedisScript<List> redeemScript;
     private final DefaultRedisScript<List> issueSessionScript;
+    private final DefaultRedisScript<List> validateSessionScript;
     private final SecureRandom random = new SecureRandom();
 
     public RedisQueue(ReactiveStringRedisTemplate redis) {
@@ -45,6 +46,9 @@ public class RedisQueue {
         issueSessionScript = new DefaultRedisScript<>();
         issueSessionScript.setLocation(new ClassPathResource("redis/issue-session.lua"));
         issueSessionScript.setResultType(List.class);
+        validateSessionScript = new DefaultRedisScript<>();
+        validateSessionScript.setLocation(new ClassPathResource("redis/validate-session.lua"));
+        validateSessionScript.setResultType(List.class);
     }
 
     public Mono<QueueEntry> join(UUID gateId, UUID userId) {
@@ -107,6 +111,35 @@ public class RedisQueue {
                             : Mono.just(new QueueSession(result.get(0).toString(),
                                     Long.parseLong(result.get(1).toString()))));
         });
+    }
+
+    public Mono<QueueSession> validateSession(String token, UUID userId) {
+        return Mono.defer(() -> {
+            UUID gate = sessionGateId(token);
+            return redis.execute(validateSessionScript, keys(gate), List.of(token, userId.toString()))
+                    .single().flatMap(result -> result.isEmpty()
+                            ? Mono.error(new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid session"))
+                            : Mono.just(new QueueSession(result.get(0).toString(),
+                                    Long.parseLong(result.get(1).toString()))));
+        });
+    }
+
+    public UUID sessionGateId(String token) {
+        try {
+            String[] parts = token.split(":", -1);
+            if (parts.length != 2 || parts[1].length() != 43) {
+                throw new IllegalArgumentException();
+            }
+            UUID gate = UUID.fromString(parts[0]);
+            byte[] secret = Base64.getUrlDecoder().decode(parts[1]);
+            if (!gate.toString().equals(parts[0]) || secret.length != 32
+                    || !Base64.getUrlEncoder().withoutPadding().encodeToString(secret).equals(parts[1])) {
+                throw new IllegalArgumentException();
+            }
+            return gate;
+        } catch (IllegalArgumentException | NullPointerException error) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid session");
+        }
     }
 
     private List<String> keys(UUID gateId) {
