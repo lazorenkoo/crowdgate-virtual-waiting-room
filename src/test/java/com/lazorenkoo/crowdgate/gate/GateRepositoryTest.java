@@ -72,6 +72,46 @@ class GateRepositoryTest {
     }
 
     @Test
+    void heartbeatRenewsConfiguredTtlButCannotReviveExpiredSession() {
+        Gate gate = new Gate("HTTP heartbeat", 10, 10, 123, 60);
+        gate.changeStatus(GateStatus.OPEN);
+        UUID id = repository.saveAndFlush(gate).getId();
+        UUID user = UUID.randomUUID();
+        QueueEntry entry = queue.join(id, user).block(Duration.ofSeconds(5));
+        queue.admit(id, 10, 10, 60).block(Duration.ofSeconds(5));
+        var redeemed = client.post().uri("/api/v1/queue/" + entry.queueToken() + "/redeem")
+                .cookie("cg_user_id", user.toString()).exchange().expectStatus().isOk()
+                .expectBody().returnResult();
+        String secret = redeemed.getResponseCookies().getFirst("cg_session").getValue();
+        String activeKey = "cg:{" + id + "}:active";
+        double shortened = Instant.now().plusSeconds(30).toEpochMilli();
+        redisTemplate.opsForZSet().add(activeKey, entry.queueToken(), shortened).block(Duration.ofSeconds(5));
+        String path = "/api/v1/gates/" + id + "/session/heartbeat";
+        client.post().uri(path).cookie("cg_user_id", UUID.randomUUID().toString())
+                .cookie("cg_session", secret).exchange().expectStatus().isUnauthorized()
+                .expectBody().returnResult();
+        assertThat(redisTemplate.opsForZSet().score(activeKey, entry.queueToken()).block(Duration.ofSeconds(5)))
+                .isEqualTo(shortened);
+        gate.changeStatus(GateStatus.CLOSED);
+        repository.saveAndFlush(gate);
+        long before = Instant.now().toEpochMilli();
+        client.post().uri(path).cookie("cg_user_id", user.toString()).cookie("cg_session", secret)
+                .exchange().expectStatus().isOk().expectHeader().valueEquals("Cache-Control", "no-store")
+                .expectCookie().valueEquals("cg_session", secret).expectCookie().httpOnly("cg_session", true)
+                .expectBody().jsonPath("$.gateId").isEqualTo(id.toString())
+                .jsonPath("$.sessionToken").doesNotExist();
+        long after = Instant.now().toEpochMilli();
+        assertThat(redisTemplate.opsForZSet().score(activeKey, entry.queueToken()).block(Duration.ofSeconds(5)))
+                .isBetween((double) before + 123000, (double) after + 123000);
+        redisTemplate.opsForZSet().add(activeKey, entry.queueToken(), 0).block(Duration.ofSeconds(5));
+        client.post().uri(path).cookie("cg_user_id", user.toString()).cookie("cg_session", secret)
+                .exchange().expectStatus().isUnauthorized().expectCookie().doesNotExist("cg_session")
+                .expectBody().returnResult();
+        assertThat(redisTemplate.opsForZSet().score(activeKey, entry.queueToken()).block(Duration.ofSeconds(5)))
+                .isZero();
+    }
+
+    @Test
     void sessionCookieIsGateBoundAndValidationDoesNotExposeSecret() {
         Gate gate = new Gate("HTTP session", 10, 10, 123, 60);
         gate.changeStatus(GateStatus.OPEN);

@@ -42,6 +42,23 @@ class RedisQueueTest {
     }
 
     @Test
+    void heartbeatAtomicallyRejectsExpiredActiveEntry() {
+        UUID gate = UUID.randomUUID();
+        UUID user = UUID.randomUUID();
+        QueueEntry entry = queue.join(gate, user).block(Duration.ofSeconds(5));
+        queue.admit(gate, 1, 1, 60).block(Duration.ofSeconds(5));
+        queue.redeem(entry.queueToken(), user, 60).block(Duration.ofSeconds(5));
+        QueueSession session = queue.issueSession(entry.queueToken(), user).block(Duration.ofSeconds(5));
+        template.opsForZSet().add("cg:{" + gate + "}:active", entry.queueToken(), 0)
+                .block(Duration.ofSeconds(5));
+        assertThatThrownBy(() -> queue.heartbeat(session.sessionToken(), user, 300).block(Duration.ofSeconds(5)))
+                .isInstanceOfSatisfying(ResponseStatusException.class,
+                        error -> assertThat(error.getStatusCode().value()).isEqualTo(401));
+        assertThat(template.opsForZSet().score("cg:{" + gate + "}:active", entry.queueToken())
+                .block(Duration.ofSeconds(5))).isZero();
+    }
+
+    @Test
     void validatesSessionOwnerExpiryAndActiveStateWithoutRenewal() {
         UUID gate = UUID.randomUUID();
         UUID user = UUID.randomUUID();
