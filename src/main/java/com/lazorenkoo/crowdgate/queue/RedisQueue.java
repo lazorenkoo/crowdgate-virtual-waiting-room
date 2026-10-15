@@ -10,6 +10,8 @@ import reactor.core.publisher.Mono;
 
 import java.util.List;
 import java.util.UUID;
+import java.util.Base64;
+import java.security.SecureRandom;
 
 @Component
 public class RedisQueue {
@@ -20,6 +22,8 @@ public class RedisQueue {
     private final DefaultRedisScript<Long> closeScript;
     private final DefaultRedisScript<List> admitScript;
     private final DefaultRedisScript<List> redeemScript;
+    private final DefaultRedisScript<List> issueSessionScript;
+    private final SecureRandom random = new SecureRandom();
 
     public RedisQueue(ReactiveStringRedisTemplate redis) {
         this.redis = redis;
@@ -38,6 +42,9 @@ public class RedisQueue {
         redeemScript = new DefaultRedisScript<>();
         redeemScript.setLocation(new ClassPathResource("redis/redeem.lua"));
         redeemScript.setResultType(List.class);
+        issueSessionScript = new DefaultRedisScript<>();
+        issueSessionScript.setLocation(new ClassPathResource("redis/issue-session.lua"));
+        issueSessionScript.setResultType(List.class);
     }
 
     public Mono<QueueEntry> join(UUID gateId, UUID userId) {
@@ -88,11 +95,26 @@ public class RedisQueue {
         });
     }
 
+    public Mono<QueueSession> issueSession(String token, UUID userId) {
+        return Mono.defer(() -> {
+            UUID gate = gateId(token);
+            byte[] bytes = new byte[32];
+            random.nextBytes(bytes);
+            String candidate = gate + ":" + Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
+            return redis.execute(issueSessionScript, keys(gate), List.of(token, userId.toString(), candidate))
+                    .single().flatMap(result -> result.isEmpty()
+                            ? Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND, "Active session not found"))
+                            : Mono.just(new QueueSession(result.get(0).toString(),
+                                    Long.parseLong(result.get(1).toString()))));
+        });
+    }
+
     private List<String> keys(UUID gateId) {
         String prefix = "cg:{" + gateId + "}:";
         return List.of(prefix + "waiting", prefix + "identities", prefix + "statuses",
                 prefix + "owners", prefix + "sequence", prefix + "closed", prefix + "reservations",
-                prefix + "admission-window", prefix + "active");
+                prefix + "admission-window", prefix + "active", prefix + "sessions-by-entry",
+                prefix + "session-entries");
     }
 
     public Mono<QueueEntry> status(String token, UUID userId) {
