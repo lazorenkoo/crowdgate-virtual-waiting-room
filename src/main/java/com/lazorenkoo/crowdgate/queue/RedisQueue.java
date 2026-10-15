@@ -19,6 +19,7 @@ public class RedisQueue {
     private final DefaultRedisScript<List> statusScript;
     private final DefaultRedisScript<Long> closeScript;
     private final DefaultRedisScript<List> admitScript;
+    private final DefaultRedisScript<List> redeemScript;
 
     public RedisQueue(ReactiveStringRedisTemplate redis) {
         this.redis = redis;
@@ -34,6 +35,9 @@ public class RedisQueue {
         admitScript = new DefaultRedisScript<>();
         admitScript.setLocation(new ClassPathResource("redis/admit.lua"));
         admitScript.setResultType(List.class);
+        redeemScript = new DefaultRedisScript<>();
+        redeemScript.setLocation(new ClassPathResource("redis/redeem.lua"));
+        redeemScript.setResultType(List.class);
     }
 
     public Mono<QueueEntry> join(UUID gateId, UUID userId) {
@@ -60,6 +64,26 @@ public class RedisQueue {
                     .single().map(result -> {
                         List<?> values = result;
                         return values.stream().map(Object::toString).toList();
+                    });
+        });
+    }
+
+    public Mono<QueueEntry> redeem(String token, UUID userId, int sessionTtlSeconds) {
+        return Mono.defer(() -> {
+            UUID gateId = gateId(token);
+            if (sessionTtlSeconds < 1) {
+                return Mono.error(new IllegalArgumentException("Session TTL must be positive"));
+            }
+            return redis.execute(redeemScript, keys(gateId), List.of(token, userId.toString(),
+                            Integer.toString(sessionTtlSeconds)))
+                    .single().map(result -> {
+                        if (result.size() == 1) {
+                            int code = Integer.parseInt(result.getFirst().toString());
+                            String message = code == 404 ? "Queue entry not found"
+                                    : code == 410 ? "Gate is closed" : "Admission is not valid";
+                            throw new ResponseStatusException(HttpStatus.valueOf(code), message);
+                        }
+                        return entry(result);
                     });
         });
     }
