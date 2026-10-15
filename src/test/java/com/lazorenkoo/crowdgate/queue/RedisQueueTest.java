@@ -42,6 +42,56 @@ class RedisQueueTest {
     }
 
     @Test
+    void issuesSessionOnlyForOwnerOfLiveActiveEntry() {
+        UUID gate = UUID.randomUUID();
+        UUID user = UUID.randomUUID();
+        QueueEntry entry = queue.join(gate, user).block(Duration.ofSeconds(5));
+        assertThatThrownBy(() -> queue.issueSession(entry.queueToken(), user).block(Duration.ofSeconds(5)))
+                .isInstanceOfSatisfying(ResponseStatusException.class,
+                        error -> assertThat(error.getStatusCode().value()).isEqualTo(404));
+        queue.admit(gate, 1, 1, 60).block(Duration.ofSeconds(5));
+        queue.redeem(entry.queueToken(), user, 60).block(Duration.ofSeconds(5));
+        assertThatThrownBy(() -> queue.issueSession(entry.queueToken(), UUID.randomUUID())
+                .block(Duration.ofSeconds(5))).isInstanceOfSatisfying(ResponseStatusException.class,
+                        error -> assertThat(error.getStatusCode().value()).isEqualTo(404));
+        QueueSession session = queue.issueSession(entry.queueToken(), user).block(Duration.ofSeconds(5));
+        String[] parts = session.sessionToken().split(":");
+        assertThat(parts).hasSize(2);
+        assertThat(parts[0]).isEqualTo(gate.toString());
+        assertThat(java.util.Base64.getUrlDecoder().decode(parts[1])).hasSize(32);
+        Double expires = template.opsForZSet().score("cg:{" + gate + "}:active", entry.queueToken())
+                .block(Duration.ofSeconds(5));
+        assertThat(session.expiresAtMillis()).isEqualTo(expires.longValue());
+        queue.close(gate).block(Duration.ofSeconds(5));
+        assertThat(queue.issueSession(entry.queueToken(), user).block(Duration.ofSeconds(5))).isEqualTo(session);
+        template.opsForZSet().add("cg:{" + gate + "}:active", entry.queueToken(), 0)
+                .block(Duration.ofSeconds(5));
+        assertThatThrownBy(() -> queue.issueSession(entry.queueToken(), user).block(Duration.ofSeconds(5)))
+                .isInstanceOfSatisfying(ResponseStatusException.class,
+                        error -> assertThat(error.getStatusCode().value()).isEqualTo(404));
+    }
+
+    @Test
+    void concurrentSessionIssuanceReusesOneCredentialAndExpiry() {
+        UUID gate = UUID.randomUUID();
+        UUID user = UUID.randomUUID();
+        QueueEntry entry = queue.join(gate, user).block(Duration.ofSeconds(5));
+        queue.admit(gate, 1, 1, 60).block(Duration.ofSeconds(5));
+        queue.redeem(entry.queueToken(), user, 60).block(Duration.ofSeconds(5));
+        RedisQueue second = new RedisQueue(template);
+        var sessions = Flux.range(0, 100).flatMap(index -> (index % 2 == 0 ? queue : second)
+                .issueSession(entry.queueToken(), user), 16).collectList().block(Duration.ofSeconds(10));
+        assertThat(sessions).hasSize(100);
+        assertThat(sessions.stream().map(QueueSession::sessionToken).distinct().count()).isEqualTo(1);
+        assertThat(sessions.stream().map(QueueSession::expiresAtMillis).distinct().count()).isEqualTo(1);
+        String prefix = "cg:{" + gate + "}:";
+        assertThat(template.opsForHash().size(prefix + "sessions-by-entry").block(Duration.ofSeconds(5)))
+                .isEqualTo(1);
+        assertThat(template.opsForHash().size(prefix + "session-entries").block(Duration.ofSeconds(5)))
+                .isEqualTo(1);
+    }
+
+    @Test
     void admissionReclaimsExpiredActiveSeatForNextWaitingUser() {
         UUID gate = UUID.randomUUID();
         UUID user = UUID.randomUUID();
