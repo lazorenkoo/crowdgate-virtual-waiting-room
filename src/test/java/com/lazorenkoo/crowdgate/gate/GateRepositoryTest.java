@@ -60,9 +60,79 @@ class GateRepositoryTest {
     @Autowired
     GateAdmissionService admission;
 
+    @Autowired
+    org.springframework.transaction.PlatformTransactionManager transactions;
+
     @BeforeEach
     void authenticateClient() {
         client = client.mutate().defaultHeader("X-Admin-Key", "test-admin-key").build();
+    }
+
+    @Test
+    void admissionRechecksPausedExpiredAndMissingGates() {
+        UUID user = UUID.randomUUID();
+        for (boolean expired : new boolean[]{false, true}) {
+            Gate gate = new Gate("Admission recheck", 10, 10, 300, 120);
+            if (expired) {
+                gate.setSchedule(Instant.EPOCH, Instant.EPOCH.plusSeconds(60));
+            }
+            gate.changeStatus(GateStatus.OPEN);
+            UUID id = repository.saveAndFlush(gate).getId();
+            QueueEntry entry = queue.join(id, user).block(Duration.ofSeconds(5));
+            if (!expired) {
+                gate.changeStatus(GateStatus.PAUSED);
+                repository.saveAndFlush(gate);
+            }
+            admission.admit(id);
+            assertThat(queue.status(entry.queueToken(), user).block(Duration.ofSeconds(5)).status())
+                    .isEqualTo("WAITING");
+        }
+        admission.admit(UUID.randomUUID());
+    }
+
+    @Test
+    void admissionWaitsForConcurrentPauseTransaction() throws Exception {
+        Gate gate = new Gate("Locked admission", 10, 10, 300, 120);
+        gate.changeStatus(GateStatus.OPEN);
+        UUID id = repository.saveAndFlush(gate).getId();
+        UUID user = UUID.randomUUID();
+        QueueEntry entry = queue.join(id, user).block(Duration.ofSeconds(5));
+        CountDownLatch locked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch started = new CountDownLatch(1);
+        var executor = Executors.newFixedThreadPool(2);
+        try {
+            var pause = executor.submit(() -> new org.springframework.transaction.support.TransactionTemplate(
+                    transactions).executeWithoutResult(transaction -> {
+                        Gate current = repository.findForAdmission(id).orElseThrow();
+                        current.changeStatus(GateStatus.PAUSED);
+                        repository.saveAndFlush(current);
+                        locked.countDown();
+                        try {
+                            if (!release.await(5, TimeUnit.SECONDS)) {
+                                throw new IllegalStateException("Pause release timed out");
+                            }
+                        } catch (InterruptedException error) {
+                            Thread.currentThread().interrupt();
+                            throw new IllegalStateException(error);
+                        }
+                    }));
+            assertThat(locked.await(5, TimeUnit.SECONDS)).isTrue();
+            var attempt = executor.submit(() -> {
+                started.countDown();
+                admission.admit(id);
+            });
+            assertThat(started.await(5, TimeUnit.SECONDS)).isTrue();
+            release.countDown();
+            pause.get(5, TimeUnit.SECONDS);
+            attempt.get(5, TimeUnit.SECONDS);
+            assertThat(repository.findById(id).orElseThrow().getStatus()).isEqualTo(GateStatus.PAUSED);
+            assertThat(queue.status(entry.queueToken(), user).block(Duration.ofSeconds(5)).status())
+                    .isEqualTo("WAITING");
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+        }
     }
 
     @Test
