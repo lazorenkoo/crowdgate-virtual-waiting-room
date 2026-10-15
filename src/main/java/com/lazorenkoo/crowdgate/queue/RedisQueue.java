@@ -105,7 +105,7 @@ public class RedisQueue {
         });
     }
 
-    private UUID gateId(String token) {
+    public UUID gateId(String token) {
         String[] parts = token.split(":", -1);
         if (parts.length != 2) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Invalid queue token");

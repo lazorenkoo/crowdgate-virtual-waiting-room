@@ -47,4 +47,17 @@ public class QueueController {
     public Mono<QueueEntry> status(@PathVariable String queueToken, ServerWebExchange exchange) {
         return queue.status(queueToken, identity.resolve(exchange));
     }
+
+    @PostMapping("/queue/{queueToken}/redeem")
+    public Mono<QueueEntry> redeem(@PathVariable String queueToken, ServerWebExchange exchange) {
+        UUID user = identity.resolve(exchange);
+        return queue.status(queueToken, user)
+                .flatMap(entry -> gates.findById(queue.gateId(queueToken)))
+                .flatMap(gate -> {
+                    boolean closed = gate.getStatus() == GateStatus.CLOSED || gate.getClosesAt() != null
+                            && !gate.getClosesAt().isAfter(Instant.now());
+                    Mono<Void> synchronize = closed ? queue.close(gate.getId()) : Mono.empty();
+                    return synchronize.then(queue.redeem(queueToken, user, gate.getSessionTtlSeconds()));
+                });
+    }
 }
