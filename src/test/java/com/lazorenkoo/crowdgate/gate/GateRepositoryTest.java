@@ -61,11 +61,70 @@ class GateRepositoryTest {
     GateAdmissionService admission;
 
     @Autowired
+    org.springframework.data.redis.core.ReactiveStringRedisTemplate redisTemplate;
+
+    @Autowired
     org.springframework.transaction.PlatformTransactionManager transactions;
 
     @BeforeEach
     void authenticateClient() {
         client = client.mutate().defaultHeader("X-Admin-Key", "test-admin-key").build();
+    }
+
+    @Test
+    void redeemsAdmissionOverHttpWithConfiguredSessionTtl() {
+        Gate gate = new Gate("HTTP redemption", 10, 10, 123, 60);
+        gate.changeStatus(GateStatus.OPEN);
+        UUID id = repository.saveAndFlush(gate).getId();
+        UUID user = UUID.randomUUID();
+        QueueEntry entry = queue.join(id, user).block(Duration.ofSeconds(5));
+        String path = "/api/v1/queue/" + entry.queueToken() + "/redeem";
+        client.post().uri(path).cookie("cg_user_id", user.toString()).exchange()
+                .expectStatus().isEqualTo(409).expectBody().returnResult();
+        queue.admit(id, 10, 10, 60).block(Duration.ofSeconds(5));
+        long before = Instant.now().toEpochMilli();
+        client.post().uri(path).cookie("cg_user_id", user.toString()).exchange()
+                .expectStatus().isOk().expectBody()
+                .jsonPath("$.queueToken").isEqualTo(entry.queueToken())
+                .jsonPath("$.status").isEqualTo("ACTIVE").jsonPath("$.position").isEqualTo(0);
+        long after = Instant.now().toEpochMilli();
+        Double expires = redisTemplate.opsForZSet().score("cg:{" + id + "}:active", entry.queueToken())
+                .block(Duration.ofSeconds(5));
+        assertThat(expires).isBetween((double) before + 123000, (double) after + 123000);
+        client.post().uri(path).cookie("cg_user_id", user.toString()).exchange()
+                .expectStatus().isOk().expectBody().jsonPath("$.status").isEqualTo("ACTIVE");
+        assertThat(redisTemplate.opsForZSet().score("cg:{" + id + "}:active", entry.queueToken())
+                .block(Duration.ofSeconds(5))).isEqualTo(expires);
+        client.post().uri(path).cookie("cg_user_id", UUID.randomUUID().toString()).exchange()
+                .expectStatus().isNotFound().expectBody().returnResult();
+        client.post().uri(path).exchange().expectStatus().isNotFound().expectBody().returnResult();
+        client.post().uri("/api/v1/queue/invalid/redeem").exchange()
+                .expectStatus().isBadRequest().expectBody().returnResult();
+        client.post().uri("/api/v1/queue/" + id + ":" + UUID.randomUUID() + "/redeem").exchange()
+                .expectStatus().isNotFound().expectBody().returnResult();
+    }
+
+    @Test
+    void redemptionRepairsClosedGateMarkerAndPreservesExistingActiveEntry() {
+        Gate gate = new Gate("Closed redemption", 10, 10, 123, 60);
+        gate.changeStatus(GateStatus.OPEN);
+        UUID id = repository.saveAndFlush(gate).getId();
+        UUID activeUser = UUID.randomUUID();
+        UUID admittedUser = UUID.randomUUID();
+        QueueEntry active = queue.join(id, activeUser).block(Duration.ofSeconds(5));
+        QueueEntry admitted = queue.join(id, admittedUser).block(Duration.ofSeconds(5));
+        queue.admit(id, 10, 10, 60).block(Duration.ofSeconds(5));
+        queue.redeem(active.queueToken(), activeUser, 123).block(Duration.ofSeconds(5));
+        gate.changeStatus(GateStatus.CLOSED);
+        repository.saveAndFlush(gate);
+        client.post().uri("/api/v1/queue/" + admitted.queueToken() + "/redeem")
+                .cookie("cg_user_id", admittedUser.toString()).exchange()
+                .expectStatus().isEqualTo(410).expectBody().returnResult();
+        client.post().uri("/api/v1/queue/" + active.queueToken() + "/redeem")
+                .cookie("cg_user_id", activeUser.toString()).exchange()
+                .expectStatus().isOk().expectBody().jsonPath("$.status").isEqualTo("ACTIVE");
+        assertThat(queue.status(admitted.queueToken(), admittedUser).block(Duration.ofSeconds(5)).status())
+                .isEqualTo("CANCELLED");
     }
 
     @Test
