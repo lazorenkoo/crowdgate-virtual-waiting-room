@@ -11,6 +11,7 @@ import jakarta.persistence.PrePersist;
 import jakarta.persistence.PreUpdate;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -54,6 +55,9 @@ public class Gate {
     @Version
     private long version;
 
+    @Column(nullable = false)
+    private boolean queueClosePending;
+
     protected Gate() {
     }
 
@@ -96,6 +100,9 @@ public class Gate {
             throw new GateTransitionException(status, target);
         }
         status = target;
+        if (target == GateStatus.CLOSED) {
+            queueClosePending = true;
+        }
     }
 
     public void setSchedule(Instant opening, Instant closing) {
@@ -158,5 +165,10 @@ public class Gate {
 
     public long getVersion() {
         return version;
+    }
+
+    @JsonIgnore
+    public boolean isQueueClosePending() {
+        return queueClosePending;
     }
 }
