@@ -31,6 +31,7 @@ public class GateAdmissionRunner {
                 cursor = gate.getId();
             } catch (RuntimeException error) {
                 log.warn("Admission will be retried for gate {}", gate.getId());
+                cursor = gate.getId();
                 return;
             }
         }
