@@ -18,6 +18,7 @@ public class RedisQueue {
     private final DefaultRedisScript<List> joinScript;
     private final DefaultRedisScript<List> statusScript;
     private final DefaultRedisScript<Long> closeScript;
+    private final DefaultRedisScript<List> admitScript;
 
     public RedisQueue(ReactiveStringRedisTemplate redis) {
         this.redis = redis;
@@ -30,6 +31,9 @@ public class RedisQueue {
         closeScript = new DefaultRedisScript<>();
         closeScript.setLocation(new ClassPathResource("redis/close.lua"));
         closeScript.setResultType(Long.class);
+        admitScript = new DefaultRedisScript<>();
+        admitScript.setLocation(new ClassPathResource("redis/admit.lua"));
+        admitScript.setResultType(List.class);
     }
 
     public Mono<QueueEntry> join(UUID gateId, UUID userId) {
@@ -46,10 +50,24 @@ public class RedisQueue {
         return redis.execute(closeScript, keys(gateId)).then();
     }
 
+    public Mono<List<String>> admit(UUID gateId, int limit, int capacity, int tokenTtlSeconds) {
+        return Mono.defer(() -> {
+            if (limit < 1 || capacity < 1 || tokenTtlSeconds < 1) {
+                return Mono.error(new IllegalArgumentException("Admission limits must be positive"));
+            }
+            return redis.execute(admitScript, keys(gateId), List.of(Integer.toString(limit),
+                            Integer.toString(capacity), Integer.toString(tokenTtlSeconds)))
+                    .single().map(result -> {
+                        List<?> values = result;
+                        return values.stream().map(Object::toString).toList();
+                    });
+        });
+    }
+
     private List<String> keys(UUID gateId) {
         String prefix = "cg:{" + gateId + "}:";
         return List.of(prefix + "waiting", prefix + "identities", prefix + "statuses",
-                prefix + "owners", prefix + "sequence", prefix + "closed");
+                prefix + "owners", prefix + "sequence", prefix + "closed", prefix + "reservations");
     }
 
     public Mono<QueueEntry> status(String token, UUID userId) {
