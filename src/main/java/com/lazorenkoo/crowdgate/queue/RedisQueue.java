@@ -17,6 +17,7 @@ public class RedisQueue {
     private final ReactiveStringRedisTemplate redis;
     private final DefaultRedisScript<List> joinScript;
     private final DefaultRedisScript<List> statusScript;
+    private final DefaultRedisScript<Long> closeScript;
 
     public RedisQueue(ReactiveStringRedisTemplate redis) {
         this.redis = redis;
@@ -26,20 +27,29 @@ public class RedisQueue {
         statusScript = new DefaultRedisScript<>();
         statusScript.setLocation(new ClassPathResource("redis/status.lua"));
         statusScript.setResultType(List.class);
+        closeScript = new DefaultRedisScript<>();
+        closeScript.setLocation(new ClassPathResource("redis/close.lua"));
+        closeScript.setResultType(Long.class);
     }
 
     public Mono<QueueEntry> join(UUID gateId, UUID userId) {
         return Mono.defer(() -> {
             String token = gateId + ":" + UUID.randomUUID();
             return redis.execute(joinScript, keys(gateId), List.of(userId.toString(), token))
-                    .single().map(this::entry);
+                    .single().flatMap(result -> result.isEmpty()
+                            ? Mono.error(new ResponseStatusException(HttpStatus.GONE, "Gate is closed"))
+                            : Mono.just(entry(result)));
         });
+    }
+
+    public Mono<Void> close(UUID gateId) {
+        return redis.execute(closeScript, keys(gateId)).then();
     }
 
     private List<String> keys(UUID gateId) {
         String prefix = "cg:{" + gateId + "}:";
         return List.of(prefix + "waiting", prefix + "identities", prefix + "statuses",
-                prefix + "owners", prefix + "sequence");
+                prefix + "owners", prefix + "sequence", prefix + "closed");
     }
 
     public Mono<QueueEntry> status(String token, UUID userId) {
