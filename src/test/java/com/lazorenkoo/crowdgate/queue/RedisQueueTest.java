@@ -13,6 +13,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import java.time.Duration;
 import java.util.UUID;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -38,6 +39,40 @@ class RedisQueueTest {
     @AfterAll
     static void disconnect() {
         connection.destroy();
+    }
+
+    @Test
+    void concurrentJoinsCannotRecreateWaitingQueueAfterClose() {
+        UUID gate = UUID.randomUUID();
+        UUID seedUser = UUID.randomUUID();
+        QueueEntry seed = queue.join(gate, seedUser).block(Duration.ofSeconds(5));
+        RedisQueue second = new RedisQueue(template);
+        var accepted = Flux.range(0, 1001).flatMap(index -> {
+            if (index == 500) {
+                return second.close(gate).then(Mono.<java.util.Map.Entry<UUID, QueueEntry>>empty());
+            }
+            UUID user = UUID.randomUUID();
+            RedisQueue instance = index % 2 == 0 ? queue : second;
+            return instance.join(gate, user).map(entry -> java.util.Map.entry(user, entry))
+                    .onErrorResume(ResponseStatusException.class, error ->
+                            error.getStatusCode().value() == 410 ? Mono.empty() : Mono.error(error));
+        }, 64).collectList().block(Duration.ofSeconds(30));
+
+        assertThat(queue.status(seed.queueToken(), seedUser).block(Duration.ofSeconds(5)).status())
+                .isEqualTo("CANCELLED");
+        var statuses = Flux.fromIterable(accepted)
+                .flatMap(entry -> queue.status(entry.getValue().queueToken(), entry.getKey()), 64)
+                .collectList().block(Duration.ofSeconds(30));
+        assertThat(statuses).hasSize(accepted.size()).allSatisfy(entry -> {
+            assertThat(entry.status()).isEqualTo("CANCELLED");
+            assertThat(entry.position()).isZero();
+            assertThat(entry.queueSize()).isZero();
+        });
+        assertThat(template.opsForZSet().size("cg:{" + gate + "}:waiting").block(Duration.ofSeconds(5)))
+                .isZero();
+        assertThatThrownBy(() -> second.join(gate, UUID.randomUUID()).block(Duration.ofSeconds(5)))
+                .isInstanceOfSatisfying(ResponseStatusException.class,
+                        error -> assertThat(error.getStatusCode().value()).isEqualTo(410));
     }
 
     @Test
