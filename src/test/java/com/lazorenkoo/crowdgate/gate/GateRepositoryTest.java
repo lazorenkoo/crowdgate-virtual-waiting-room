@@ -72,6 +72,47 @@ class GateRepositoryTest {
     }
 
     @Test
+    void sessionCookieIsGateBoundAndValidationDoesNotExposeSecret() {
+        Gate gate = new Gate("HTTP session", 10, 10, 123, 60);
+        gate.changeStatus(GateStatus.OPEN);
+        UUID id = repository.saveAndFlush(gate).getId();
+        UUID user = UUID.randomUUID();
+        QueueEntry entry = queue.join(id, user).block(Duration.ofSeconds(5));
+        queue.admit(id, 10, 10, 60).block(Duration.ofSeconds(5));
+        String redeem = "/api/v1/queue/" + entry.queueToken() + "/redeem";
+        var result = client.post().uri(redeem).cookie("cg_user_id", user.toString()).exchange()
+                .expectStatus().isOk().expectHeader().valueEquals("Cache-Control", "no-store")
+                .expectCookie().httpOnly("cg_session", true).expectCookie().secure("cg_session", false)
+                .expectCookie().sameSite("cg_session", "Lax")
+                .expectCookie().path("cg_session", "/api/v1/gates/" + id)
+                .expectBody().returnResult();
+        var cookie = result.getResponseCookies().getFirst("cg_session");
+        assertThat(cookie).isNotNull();
+        assertThat(cookie.getMaxAge().toSeconds()).isBetween(1L, 123L);
+        String path = "/api/v1/gates/" + id + "/session";
+        client.get().uri(path).cookie("cg_user_id", user.toString()).cookie("cg_session", cookie.getValue())
+                .exchange().expectStatus().isOk().expectHeader().valueEquals("Cache-Control", "no-store")
+                .expectBody().jsonPath("$.gateId").isEqualTo(id.toString())
+                .jsonPath("$.expiresAtMillis").isNumber().jsonPath("$.sessionToken").doesNotExist();
+        client.get().uri(path).exchange().expectStatus().isUnauthorized().expectBody().returnResult();
+        client.get().uri(path).cookie("cg_user_id", UUID.randomUUID().toString())
+                .cookie("cg_session", cookie.getValue()).exchange()
+                .expectStatus().isUnauthorized().expectBody().returnResult();
+        client.get().uri("/api/v1/gates/" + UUID.randomUUID() + "/session")
+                .cookie("cg_user_id", user.toString()).cookie("cg_session", cookie.getValue()).exchange()
+                .expectStatus().isUnauthorized().expectBody().returnResult();
+        client.get().uri(path).cookie("cg_user_id", user.toString()).cookie("cg_session", "invalid")
+                .exchange().expectStatus().isUnauthorized().expectBody().returnResult();
+        client.post().uri(redeem).cookie("cg_user_id", user.toString()).exchange()
+                .expectStatus().isOk().expectCookie().valueEquals("cg_session", cookie.getValue())
+                .expectBody().returnResult();
+        gate.changeStatus(GateStatus.CLOSED);
+        repository.saveAndFlush(gate);
+        client.get().uri(path).cookie("cg_user_id", user.toString()).cookie("cg_session", cookie.getValue())
+                .exchange().expectStatus().isOk().expectBody().jsonPath("$.gateId").isEqualTo(id.toString());
+    }
+
+    @Test
     void redeemsAdmissionOverHttpWithConfiguredSessionTtl() {
         Gate gate = new Gate("HTTP redemption", 10, 10, 123, 60);
         gate.changeStatus(GateStatus.OPEN);
