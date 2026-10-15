@@ -42,6 +42,58 @@ class RedisQueueTest {
     }
 
     @Test
+    void redeemsAdmissionOnceWithoutExtendingActiveExpiry() {
+        UUID gate = UUID.randomUUID();
+        UUID user = UUID.randomUUID();
+        QueueEntry entry = queue.join(gate, user).block(Duration.ofSeconds(5));
+        queue.admit(gate, 1, 1, 60).block(Duration.ofSeconds(5));
+        assertThatThrownBy(() -> queue.redeem(entry.queueToken(), UUID.randomUUID(), 60)
+                .block(Duration.ofSeconds(5))).isInstanceOfSatisfying(ResponseStatusException.class,
+                        error -> assertThat(error.getStatusCode().value()).isEqualTo(404));
+        QueueEntry active = queue.redeem(entry.queueToken(), user, 60).block(Duration.ofSeconds(5));
+        assertThat(active.status()).isEqualTo("ACTIVE");
+        assertThat(active.position()).isZero();
+        String prefix = "cg:{" + gate + "}:";
+        assertThat(template.opsForZSet().size(prefix + "reservations").block(Duration.ofSeconds(5))).isZero();
+        assertThat(template.opsForZSet().size(prefix + "active").block(Duration.ofSeconds(5))).isEqualTo(1);
+        Double expires = template.opsForZSet().score(prefix + "active", entry.queueToken())
+                .block(Duration.ofSeconds(5));
+        queue.close(gate).block(Duration.ofSeconds(5));
+        assertThat(queue.redeem(entry.queueToken(), user, 300).block(Duration.ofSeconds(5)))
+                .isEqualTo(active);
+        assertThat(template.opsForZSet().score(prefix + "active", entry.queueToken())
+                .block(Duration.ofSeconds(5))).isEqualTo(expires);
+        template.opsForZSet().add(prefix + "active", entry.queueToken(), 0).block(Duration.ofSeconds(5));
+        assertThatThrownBy(() -> queue.redeem(entry.queueToken(), user, 60).block(Duration.ofSeconds(5)))
+                .isInstanceOfSatisfying(ResponseStatusException.class,
+                        error -> assertThat(error.getStatusCode().value()).isEqualTo(409));
+        assertThat(template.opsForZSet().size(prefix + "active").block(Duration.ofSeconds(5))).isZero();
+    }
+
+    @Test
+    void rejectsExpiredOrClosedAdmissionRedemption() {
+        for (boolean closed : new boolean[]{false, true}) {
+            UUID gate = UUID.randomUUID();
+            UUID user = UUID.randomUUID();
+            QueueEntry entry = queue.join(gate, user).block(Duration.ofSeconds(5));
+            queue.admit(gate, 1, 1, 60).block(Duration.ofSeconds(5));
+            if (closed) {
+                queue.close(gate).block(Duration.ofSeconds(5));
+            } else {
+                template.opsForZSet().add("cg:{" + gate + "}:reservations", entry.queueToken(), 0)
+                        .block(Duration.ofSeconds(5));
+            }
+            assertThatThrownBy(() -> queue.redeem(entry.queueToken(), user, 60).block(Duration.ofSeconds(5)))
+                    .isInstanceOfSatisfying(ResponseStatusException.class,
+                            error -> assertThat(error.getStatusCode().value()).isEqualTo(closed ? 410 : 409));
+            assertThat(queue.status(entry.queueToken(), user).block(Duration.ofSeconds(5)).status())
+                    .isEqualTo(closed ? "CANCELLED" : "EXPIRED");
+            assertThat(template.opsForZSet().size("cg:{" + gate + "}:active").block(Duration.ofSeconds(5)))
+                    .isZero();
+        }
+    }
+
+    @Test
     void onlyOwnerAccessExpiresAdmissionWithoutRunner() {
         UUID gate = UUID.randomUUID();
         UUID user = UUID.randomUUID();
