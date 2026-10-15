@@ -114,9 +114,22 @@ public class RedisQueue {
     }
 
     public Mono<QueueSession> validateSession(String token, UUID userId) {
+        return session(token, userId, null);
+    }
+
+    public Mono<QueueSession> heartbeat(String token, UUID userId, int sessionTtlSeconds) {
+        if (sessionTtlSeconds < 1) {
+            return Mono.error(new IllegalArgumentException("Session TTL must be positive"));
+        }
+        return session(token, userId, sessionTtlSeconds);
+    }
+
+    private Mono<QueueSession> session(String token, UUID userId, Integer ttl) {
         return Mono.defer(() -> {
             UUID gate = sessionGateId(token);
-            return redis.execute(validateSessionScript, keys(gate), List.of(token, userId.toString()))
+            List<String> arguments = ttl == null ? List.of(token, userId.toString())
+                    : List.of(token, userId.toString(), ttl.toString());
+            return redis.execute(validateSessionScript, keys(gate), arguments)
                     .single().flatMap(result -> result.isEmpty()
                             ? Mono.error(new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid session"))
                             : Mono.just(new QueueSession(result.get(0).toString(),

@@ -8,4 +8,8 @@ local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
 if redis.call('HGET', KEYS[3], entry) ~= 'ACTIVE' or not expires or tonumber(expires) <= now then
     return {}
 end
+if ARGV[3] then
+    expires = tostring(math.max(tonumber(expires), now + tonumber(ARGV[3]) * 1000))
+    redis.call('ZADD', KEYS[9], expires, entry)
+end
 return {ARGV[1], expires}

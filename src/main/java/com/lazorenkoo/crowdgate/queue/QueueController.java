@@ -81,6 +81,25 @@ public class QueueController {
         });
     }
 
+    @PostMapping("/gates/{gateId}/session/heartbeat")
+    public Mono<SessionView> heartbeat(@PathVariable UUID gateId, ServerWebExchange exchange) {
+        exchange.getResponse().getHeaders().setCacheControl("no-store");
+        return Mono.defer(() -> {
+            HttpCookie cookie = exchange.getRequest().getCookies().getFirst("cg_session");
+            if (cookie == null || !queue.sessionGateId(cookie.getValue()).equals(gateId)) {
+                return Mono.error(new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid session"));
+            }
+            UUID user = identity.resolve(exchange);
+            return queue.validateSession(cookie.getValue(), user)
+                    .flatMap(session -> gates.findById(gateId))
+                    .flatMap(gate -> queue.heartbeat(cookie.getValue(), user, gate.getSessionTtlSeconds()))
+                    .map(session -> {
+                        setSessionCookie(exchange, gateId, session);
+                        return new SessionView(gateId, session.expiresAtMillis());
+                    });
+        });
+    }
+
     private void setSessionCookie(ServerWebExchange exchange, UUID gateId, QueueSession session) {
         long remaining = Math.max(0, session.expiresAtMillis() - Instant.now().toEpochMilli());
         ResponseCookie cookie = ResponseCookie.from("cg_session", session.sessionToken())
