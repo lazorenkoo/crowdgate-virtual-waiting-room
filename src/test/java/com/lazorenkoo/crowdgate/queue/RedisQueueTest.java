@@ -42,6 +42,54 @@ class RedisQueueTest {
     }
 
     @Test
+    void onlyOwnerAccessExpiresAdmissionWithoutRunner() {
+        UUID gate = UUID.randomUUID();
+        UUID user = UUID.randomUUID();
+        QueueEntry entry = queue.join(gate, user).block(Duration.ofSeconds(5));
+        queue.admit(gate, 1, 1, 60).block(Duration.ofSeconds(5));
+        String prefix = "cg:{" + gate + "}:";
+        template.opsForZSet().add(prefix + "reservations", entry.queueToken(), 0).block(Duration.ofSeconds(5));
+        assertThatThrownBy(() -> queue.status(entry.queueToken(), UUID.randomUUID())
+                .block(Duration.ofSeconds(5))).isInstanceOfSatisfying(ResponseStatusException.class,
+                        error -> assertThat(error.getStatusCode().value()).isEqualTo(404));
+        assertThat(template.opsForHash().get(prefix + "statuses", entry.queueToken())
+                .block(Duration.ofSeconds(5))).isEqualTo("ADMITTED");
+        QueueEntry expired = queue.status(entry.queueToken(), user).block(Duration.ofSeconds(5));
+        assertThat(expired.status()).isEqualTo("EXPIRED");
+        assertThat(expired.position()).isZero();
+        assertThat(template.opsForZSet().size(prefix + "reservations").block(Duration.ofSeconds(5))).isZero();
+    }
+
+    @Test
+    void expiredAdmissionRejoinsAtTailAndCloseOverridesExpiry() {
+        for (boolean closed : new boolean[]{false, true}) {
+            UUID gate = UUID.randomUUID();
+            UUID user = UUID.randomUUID();
+            QueueEntry first = queue.join(gate, user).block(Duration.ofSeconds(5));
+            queue.admit(gate, 1, 1, 60).block(Duration.ofSeconds(5));
+            QueueEntry waiting = queue.join(gate, UUID.randomUUID()).block(Duration.ofSeconds(5));
+            template.opsForZSet().add("cg:{" + gate + "}:reservations", first.queueToken(), 0)
+                    .block(Duration.ofSeconds(5));
+            if (closed) {
+                queue.close(gate).block(Duration.ofSeconds(5));
+                assertThat(queue.status(first.queueToken(), user).block(Duration.ofSeconds(5)).status())
+                        .isEqualTo("CANCELLED");
+            } else {
+                QueueEntry rejoined = queue.join(gate, user).block(Duration.ofSeconds(5));
+                assertThat(rejoined.queueToken()).isNotEqualTo(first.queueToken());
+                assertThat(rejoined.status()).isEqualTo("WAITING");
+                assertThat(rejoined.position()).isEqualTo(2);
+                assertThat(rejoined.queueSize()).isEqualTo(2);
+                assertThat(queue.status(first.queueToken(), user).block(Duration.ofSeconds(5)).status())
+                        .isEqualTo("EXPIRED");
+                assertThat(queue.join(gate, user).block(Duration.ofSeconds(5)).queueToken())
+                        .isEqualTo(rejoined.queueToken());
+                assertThat(waiting.position()).isEqualTo(1);
+            }
+        }
+    }
+
+    @Test
     void sharesAdmissionBudgetAcrossCallsWithinRedisSecond() throws java.io.IOException {
         UUID gate = UUID.randomUUID();
         queue.join(gate, UUID.randomUUID()).block(Duration.ofSeconds(5));
