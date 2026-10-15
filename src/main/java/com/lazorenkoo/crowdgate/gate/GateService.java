@@ -98,6 +98,8 @@ public class GateService {
                         ? queue.close(id).onErrorMap(DataAccessException.class, error ->
                                 new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
                                         "Queue close is pending; retry closing the gate"))
+                                .then(Mono.fromRunnable(() -> repository.acknowledgeQueueClose(id))
+                                        .subscribeOn(Schedulers.boundedElastic()))
                                 .thenReturn(gate)
                         : Mono.just(gate))
                 .onErrorMap(GateTransitionException.class, error ->
