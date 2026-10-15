@@ -63,6 +63,54 @@ class GateRepositoryTest {
     }
 
     @Test
+    void concurrentCloseSynchronizersSafelyAcknowledgeSameGate() throws Exception {
+        Gate gate = new Gate("Parallel close recovery", 10, 100, 300, 120);
+        gate.changeStatus(GateStatus.OPEN);
+        UUID id = repository.saveAndFlush(gate).getId();
+        UUID user = UUID.randomUUID();
+        QueueEntry entry = queue.join(id, user).block(Duration.ofSeconds(5));
+        gate = repository.findById(id).orElseThrow();
+        gate.changeStatus(GateStatus.CLOSED);
+        long version = repository.saveAndFlush(gate).getVersion();
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        var executor = Executors.newFixedThreadPool(2);
+        try {
+            var first = executor.submit(() -> {
+                ready.countDown();
+                if (!start.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Close start timed out");
+                }
+                new GateQueueCloseSynchronizer(repository, queue).close(id).block(Duration.ofSeconds(5));
+                return null;
+            });
+            var second = executor.submit(() -> {
+                ready.countDown();
+                if (!start.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Close start timed out");
+                }
+                new GateQueueCloseSynchronizer(repository, queue).close(id).block(Duration.ofSeconds(5));
+                return null;
+            });
+            assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+            first.get(10, TimeUnit.SECONDS);
+            second.get(10, TimeUnit.SECONDS);
+        } finally {
+            start.countDown();
+            executor.shutdownNow();
+        }
+        Gate completed = repository.findById(id).orElseThrow();
+        assertThat(completed.getStatus()).isEqualTo(GateStatus.CLOSED);
+        assertThat(completed.getVersion()).isEqualTo(version);
+        assertThat(completed.isQueueClosePending()).isFalse();
+        assertThat(repository.acknowledgeQueueClose(id)).isZero();
+        QueueEntry cancelled = queue.status(entry.queueToken(), user).block(Duration.ofSeconds(5));
+        assertThat(cancelled.status()).isEqualTo("CANCELLED");
+        assertThat(cancelled.queueSize()).isZero();
+    }
+
+    @Test
     void recoversScheduledCloseAfterOnlyDatabaseUpdateCompleted() {
         Instant closing = Instant.parse("2040-01-01T10:00:00Z");
         Gate gate = new Gate("Recover scheduled close", 10, 100, 300, 120);
