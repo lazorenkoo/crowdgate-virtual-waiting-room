@@ -1,5 +1,7 @@
 package com.lazorenkoo.crowdgate.gate;
 
+import com.lazorenkoo.crowdgate.queue.RedisQueue;
+import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.data.domain.Page;
@@ -17,9 +19,11 @@ import java.time.Instant;
 public class GateService {
 
     private final GateRepository repository;
+    private final RedisQueue queue;
 
-    public GateService(GateRepository repository) {
+    public GateService(GateRepository repository, RedisQueue queue) {
         this.repository = repository;
+        this.queue = queue;
     }
 
     public Mono<Gate> create(CreateGateRequest request) {
@@ -90,6 +94,12 @@ public class GateService {
             gate.changeStatus(target);
             return repository.saveAndFlush(gate);
         }).subscribeOn(Schedulers.boundedElastic())
+                .flatMap(gate -> target == GateStatus.CLOSED
+                        ? queue.close(id).onErrorMap(DataAccessException.class, error ->
+                                new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                                        "Queue close is pending; retry closing the gate"))
+                                .thenReturn(gate)
+                        : Mono.just(gate))
                 .onErrorMap(GateTransitionException.class, error ->
                         new ResponseStatusException(HttpStatus.CONFLICT, error.getMessage()))
                 .onErrorMap(OptimisticLockingFailureException.class, error ->

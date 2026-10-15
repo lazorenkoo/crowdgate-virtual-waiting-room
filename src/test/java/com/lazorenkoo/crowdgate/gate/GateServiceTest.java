@@ -1,5 +1,6 @@
 package com.lazorenkoo.crowdgate.gate;
 
+import com.lazorenkoo.crowdgate.queue.RedisQueue;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Mono;
@@ -17,7 +18,7 @@ import static org.mockito.Mockito.*;
 class GateServiceTest {
 
     private final GateRepository repository = mock(GateRepository.class);
-    private final GateService service = new GateService(repository);
+    private final GateService service = new GateService(repository, mock(RedisQueue.class));
 
     @Test
     void createsGateLazilyOutsideCallingThread() {
