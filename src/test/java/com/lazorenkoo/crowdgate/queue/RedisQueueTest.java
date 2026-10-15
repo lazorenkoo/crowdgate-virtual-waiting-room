@@ -12,6 +12,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.time.Duration;
 import java.util.UUID;
+import reactor.core.publisher.Flux;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -37,6 +38,49 @@ class RedisQueueTest {
     @AfterAll
     static void disconnect() {
         connection.destroy();
+    }
+
+    @Test
+    void queuesThousandConcurrentUsersWithoutMissingPositions() {
+        UUID gate = UUID.randomUUID();
+        var entries = Flux.range(0, 1000)
+                .flatMap(index -> queue.join(gate, UUID.randomUUID()), 64)
+                .collectList().block(Duration.ofSeconds(30));
+        assertThat(entries).hasSize(1000);
+        assertThat(entries.stream().map(QueueEntry::queueToken).distinct().count()).isEqualTo(1000);
+        var positions = entries.stream().map(QueueEntry::position).sorted().toList();
+        assertThat(positions).containsExactlyElementsOf(
+                java.util.stream.LongStream.rangeClosed(1, 1000).boxed().toList());
+        String prefix = "cg:{" + gate + "}:";
+        assertThat(template.opsForZSet().size(prefix + "waiting").block(Duration.ofSeconds(5)))
+                .isEqualTo(1000);
+        assertThat(template.opsForHash().size(prefix + "identities").block(Duration.ofSeconds(5)))
+                .isEqualTo(1000);
+        assertThat(template.opsForHash().size(prefix + "owners").block(Duration.ofSeconds(5)))
+                .isEqualTo(1000);
+    }
+
+    @Test
+    void concurrentInstancesReuseOneEntryForSameIdentity() {
+        UUID gate = UUID.randomUUID();
+        UUID user = UUID.randomUUID();
+        RedisQueue secondInstance = new RedisQueue(template);
+        var entries = Flux.range(0, 1000)
+                .flatMap(index -> (index % 2 == 0 ? queue : secondInstance).join(gate, user), 64)
+                .collectList().block(Duration.ofSeconds(30));
+        assertThat(entries).hasSize(1000);
+        assertThat(entries.stream().map(QueueEntry::queueToken).distinct().count()).isEqualTo(1);
+        assertThat(entries).allSatisfy(entry -> {
+            assertThat(entry.position()).isEqualTo(1);
+            assertThat(entry.queueSize()).isEqualTo(1);
+            assertThat(entry.status()).isEqualTo("WAITING");
+        });
+        String prefix = "cg:{" + gate + "}:";
+        assertThat(template.opsForValue().get(prefix + "sequence").block(Duration.ofSeconds(5)))
+                .isEqualTo("1");
+        QueueEntry next = queue.join(gate, UUID.randomUUID()).block(Duration.ofSeconds(5));
+        assertThat(next.position()).isEqualTo(2);
+        assertThat(next.queueSize()).isEqualTo(2);
     }
 
     @Test
