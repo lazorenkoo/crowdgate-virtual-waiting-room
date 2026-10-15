@@ -12,12 +12,14 @@ import org.springframework.test.web.reactive.server.WebTestClient;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.containers.GenericContainer;
 import com.lazorenkoo.crowdgate.queue.QueueEntry;
+import com.lazorenkoo.crowdgate.queue.RedisQueue;
 import org.springframework.data.domain.PageRequest;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import java.util.UUID;
 import java.util.Map;
 import java.time.Instant;
+import java.time.Duration;
 import java.time.temporal.ChronoUnit;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -52,9 +54,61 @@ class GateRepositoryTest {
     @Autowired
     WebTestClient client;
 
+    @Autowired
+    RedisQueue queue;
+
     @BeforeEach
     void authenticateClient() {
         client = client.mutate().defaultHeader("X-Admin-Key", "test-admin-key").build();
+    }
+
+    @Test
+    void recoversScheduledCloseAfterOnlyDatabaseUpdateCompleted() {
+        Instant closing = Instant.parse("2040-01-01T10:00:00Z");
+        Gate gate = new Gate("Recover scheduled close", 10, 100, 300, 120);
+        gate.setSchedule(closing.minusSeconds(120), closing);
+        gate.changeStatus(GateStatus.OPEN);
+        UUID id = repository.saveAndFlush(gate).getId();
+        UUID user = UUID.randomUUID();
+        QueueEntry entry = queue.join(id, user).block(Duration.ofSeconds(5));
+        repository.closeDue(closing);
+        Gate pending = repository.findById(id).orElseThrow();
+        assertThat(pending.getStatus()).isEqualTo(GateStatus.CLOSED);
+        assertThat(pending.isQueueClosePending()).isTrue();
+        assertThat(queue.status(entry.queueToken(), user).block(Duration.ofSeconds(5)).status())
+                .isEqualTo("WAITING");
+
+        new GateQueueCloseSynchronizer(repository, queue).run();
+
+        Gate completed = repository.findById(id).orElseThrow();
+        assertThat(completed.isQueueClosePending()).isFalse();
+        assertThat(completed.getVersion()).isEqualTo(pending.getVersion());
+        assertThat(queue.status(entry.queueToken(), user).block(Duration.ofSeconds(5)).status())
+                .isEqualTo("CANCELLED");
+        client.post().uri("/api/v1/gates/{id}/join", id).exchange()
+                .expectStatus().isEqualTo(410).expectBody().returnResult();
+        new GateQueueCloseSynchronizer(repository, queue).run();
+        assertThat(repository.findById(id).orElseThrow().getVersion()).isEqualTo(pending.getVersion());
+    }
+
+    @Test
+    void replaysRedisCloseWhenProcessStoppedBeforeDatabaseAcknowledgment() {
+        Gate gate = new Gate("Recover close acknowledgment", 10, 100, 300, 120);
+        gate.changeStatus(GateStatus.OPEN);
+        UUID id = repository.saveAndFlush(gate).getId();
+        UUID user = UUID.randomUUID();
+        QueueEntry entry = queue.join(id, user).block(Duration.ofSeconds(5));
+        gate = repository.findById(id).orElseThrow();
+        gate.changeStatus(GateStatus.CLOSED);
+        repository.saveAndFlush(gate);
+        queue.close(id).block(Duration.ofSeconds(5));
+        assertThat(repository.findById(id).orElseThrow().isQueueClosePending()).isTrue();
+
+        new GateQueueCloseSynchronizer(repository, queue).run();
+
+        assertThat(repository.findById(id).orElseThrow().isQueueClosePending()).isFalse();
+        assertThat(queue.status(entry.queueToken(), user).block(Duration.ofSeconds(5)).status())
+                .isEqualTo("CANCELLED");
     }
 
     @Test
