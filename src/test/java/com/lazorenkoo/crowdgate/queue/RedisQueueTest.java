@@ -41,6 +41,44 @@ class RedisQueueTest {
     }
 
     @Test
+    void closesWaitingAndAdmittedEntriesWithoutRevokingActiveOnes() {
+        UUID gate = UUID.randomUUID();
+        String prefix = "cg:{" + gate + "}:";
+        for (String state : new String[]{"WAITING", "ADMITTED", "ACTIVE"}) {
+            UUID user = UUID.randomUUID();
+            QueueEntry entry = queue.join(gate, user).block(Duration.ofSeconds(5));
+            template.opsForHash().put(prefix + "statuses", entry.queueToken(), state)
+                    .block(Duration.ofSeconds(5));
+            if (!state.equals("WAITING")) {
+                template.opsForZSet().remove(prefix + "waiting", entry.queueToken())
+                        .block(Duration.ofSeconds(5));
+            }
+        }
+        var owners = template.<String, String>opsForHash().entries(prefix + "owners")
+                .collectList().block(Duration.ofSeconds(5));
+        queue.close(gate).block(Duration.ofSeconds(5));
+        queue.close(gate).block(Duration.ofSeconds(5));
+        int cancelled = 0;
+        int active = 0;
+        for (var owner : owners) {
+            QueueEntry entry = queue.status(owner.getKey(), UUID.fromString(owner.getValue()))
+                    .block(Duration.ofSeconds(5));
+            assertThat(entry.position()).isZero();
+            assertThat(entry.queueSize()).isZero();
+            if (entry.status().equals("CANCELLED")) {
+                cancelled++;
+            } else if (entry.status().equals("ACTIVE")) {
+                active++;
+            }
+        }
+        assertThat(cancelled).isEqualTo(2);
+        assertThat(active).isEqualTo(1);
+        assertThatThrownBy(() -> queue.join(gate, UUID.randomUUID()).block(Duration.ofSeconds(5)))
+                .isInstanceOfSatisfying(ResponseStatusException.class,
+                        error -> assertThat(error.getStatusCode().value()).isEqualTo(410));
+    }
+
+    @Test
     void queuesThousandConcurrentUsersWithoutMissingPositions() {
         UUID gate = UUID.randomUUID();
         var entries = Flux.range(0, 1000)
