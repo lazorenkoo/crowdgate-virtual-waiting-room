@@ -42,6 +42,57 @@ class RedisQueueTest {
     }
 
     @Test
+    void admissionReclaimsExpiredActiveSeatForNextWaitingUser() {
+        UUID gate = UUID.randomUUID();
+        UUID user = UUID.randomUUID();
+        String prefix = "cg:{" + gate + "}:";
+        QueueEntry first = queue.join(gate, user).block(Duration.ofSeconds(5));
+        queue.admit(gate, 1, 1, 60).block(Duration.ofSeconds(5));
+        queue.redeem(first.queueToken(), user, 60).block(Duration.ofSeconds(5));
+        QueueEntry next = queue.join(gate, UUID.randomUUID()).block(Duration.ofSeconds(5));
+        template.opsForZSet().add(prefix + "active", first.queueToken(), 0).block(Duration.ofSeconds(5));
+        template.opsForHash().put(prefix + "admission-window", "second", "0").block(Duration.ofSeconds(5));
+        assertThat(queue.admit(gate, 1, 1, 60).block(Duration.ofSeconds(5)))
+                .containsExactly(next.queueToken());
+        assertThat(queue.status(first.queueToken(), user).block(Duration.ofSeconds(5)).status())
+                .isEqualTo("EXPIRED");
+        assertThat(template.opsForZSet().size(prefix + "active").block(Duration.ofSeconds(5))).isZero();
+        assertThat(template.opsForZSet().size(prefix + "reservations").block(Duration.ofSeconds(5)))
+                .isEqualTo(1);
+    }
+
+    @Test
+    void activeExpiryIsCheckedOnOwnerStatusAndRejoin() {
+        for (boolean readFirst : new boolean[]{false, true}) {
+            UUID gate = UUID.randomUUID();
+            UUID user = UUID.randomUUID();
+            String prefix = "cg:{" + gate + "}:";
+            QueueEntry first = queue.join(gate, user).block(Duration.ofSeconds(5));
+            queue.admit(gate, 1, 1, 60).block(Duration.ofSeconds(5));
+            queue.redeem(first.queueToken(), user, 60).block(Duration.ofSeconds(5));
+            assertThat(queue.join(gate, user).block(Duration.ofSeconds(5)).status()).isEqualTo("ACTIVE");
+            queue.join(gate, UUID.randomUUID()).block(Duration.ofSeconds(5));
+            template.opsForZSet().add(prefix + "active", first.queueToken(), 0).block(Duration.ofSeconds(5));
+            assertThatThrownBy(() -> queue.status(first.queueToken(), UUID.randomUUID())
+                    .block(Duration.ofSeconds(5))).isInstanceOfSatisfying(ResponseStatusException.class,
+                            error -> assertThat(error.getStatusCode().value()).isEqualTo(404));
+            assertThat(template.opsForHash().get(prefix + "statuses", first.queueToken())
+                    .block(Duration.ofSeconds(5))).isEqualTo("ACTIVE");
+            if (readFirst) {
+                assertThat(queue.status(first.queueToken(), user).block(Duration.ofSeconds(5)).status())
+                        .isEqualTo("EXPIRED");
+            }
+            QueueEntry rejoined = queue.join(gate, user).block(Duration.ofSeconds(5));
+            assertThat(rejoined.queueToken()).isNotEqualTo(first.queueToken());
+            assertThat(rejoined.status()).isEqualTo("WAITING");
+            assertThat(rejoined.position()).isEqualTo(2);
+            assertThat(template.opsForZSet().size(prefix + "active").block(Duration.ofSeconds(5))).isZero();
+            assertThat(queue.status(first.queueToken(), user).block(Duration.ofSeconds(5)).status())
+                    .isEqualTo("EXPIRED");
+        }
+    }
+
+    @Test
     void redeemsAdmissionOnceWithoutExtendingActiveExpiry() {
         UUID gate = UUID.randomUUID();
         UUID user = UUID.randomUUID();
