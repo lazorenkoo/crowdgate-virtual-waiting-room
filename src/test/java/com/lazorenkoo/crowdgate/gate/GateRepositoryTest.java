@@ -62,10 +62,10 @@ class GateRepositoryTest {
                 .defaultHeaders(headers -> headers.remove("X-Admin-Key")).build();
         Gate gate = repository.saveAndFlush(new Gate("Queue policy", 10, 100, 300, 120));
         String path = "/api/v1/gates/" + gate.getId() + "/join";
-        publicClient.post().uri(path).exchange().expectStatus().isEqualTo(409);
+        publicClient.post().uri(path).exchange().expectStatus().isEqualTo(409).expectBody().returnResult();
         gate.setSchedule(Instant.now().plusSeconds(3600), null);
         gate = repository.saveAndFlush(gate);
-        publicClient.post().uri(path).exchange().expectStatus().isEqualTo(409);
+        publicClient.post().uri(path).exchange().expectStatus().isEqualTo(409).expectBody().returnResult();
         gate.changeStatus(GateStatus.OPEN);
         gate.changeStatus(GateStatus.PAUSED);
         gate = repository.saveAndFlush(gate);
@@ -73,15 +73,15 @@ class GateRepositoryTest {
                 .jsonPath("$.status").isEqualTo("WAITING");
         gate.changeStatus(GateStatus.CLOSED);
         repository.saveAndFlush(gate);
-        publicClient.post().uri(path).exchange().expectStatus().isEqualTo(410);
+        publicClient.post().uri(path).exchange().expectStatus().isEqualTo(410).expectBody().returnResult();
         Gate expired = new Gate("Expired queue", 10, 100, 300, 120);
         expired.setSchedule(Instant.EPOCH, Instant.EPOCH.plusSeconds(60));
         expired.changeStatus(GateStatus.OPEN);
         UUID expiredId = repository.saveAndFlush(expired).getId();
         publicClient.post().uri("/api/v1/gates/{id}/join", expiredId)
-                .exchange().expectStatus().isEqualTo(410);
+                .exchange().expectStatus().isEqualTo(410).expectBody().returnResult();
         publicClient.post().uri("/api/v1/gates/{id}/join", UUID.randomUUID())
-                .exchange().expectStatus().isNotFound();
+                .exchange().expectStatus().isNotFound().expectBody().returnResult();
     }
 
     @Test
@@ -111,10 +111,10 @@ class GateRepositoryTest {
                 .jsonPath("$.position").isEqualTo(1)
                 .jsonPath("$.queueSize").isEqualTo(2);
         publicClient.get().uri("/api/v1/queue/{token}", first.queueToken())
-                .exchange().expectStatus().isNotFound();
+                .exchange().expectStatus().isNotFound().expectBody().returnResult();
         publicClient.get().uri("/api/v1/queue/{token}", first.queueToken())
                 .cookie("cg_user_id", UUID.randomUUID().toString())
-                .exchange().expectStatus().isNotFound();
+                .exchange().expectStatus().isNotFound().expectBody().returnResult();
     }
 
     @Test
@@ -179,20 +179,20 @@ class GateRepositoryTest {
                 .jsonPath("$.path").isEqualTo("/api/v1/admin/gates");
         anonymous.post().uri("/api/v1/admin/gates")
                 .bodyValue(new CreateGateRequest("Unauthorized", 10, 100, 300, 120))
-                .exchange().expectStatus().isUnauthorized();
+                .exchange().expectStatus().isUnauthorized().expectBody().returnResult();
         anonymous.get().uri("/api/v1/admin/gates").header("X-Admin-Key", "wrong-key")
-                .exchange().expectStatus().isUnauthorized();
+                .exchange().expectStatus().isUnauthorized().expectBody().returnResult();
         assertThat(repository.count()).isEqualTo(count);
-        client.get().uri("/api/v1/admin/gates").exchange().expectStatus().isOk();
+        client.get().uri("/api/v1/admin/gates").exchange().expectStatus().isOk().expectBody().returnResult();
     }
 
     @Test
     void appliesAdminAccessToUnknownAdminRoutesOnly() {
         WebTestClient anonymous = client.mutate()
                 .defaultHeaders(headers -> headers.remove("X-Admin-Key")).build();
-        anonymous.get().uri("/api/v1/admin").exchange().expectStatus().isUnauthorized();
-        anonymous.get().uri("/api/v1/admin/unknown").exchange().expectStatus().isUnauthorized();
-        anonymous.get().uri("/api/v1/admin-other").exchange().expectStatus().isNotFound();
+        anonymous.get().uri("/api/v1/admin").exchange().expectStatus().isUnauthorized().expectBody().returnResult();
+        anonymous.get().uri("/api/v1/admin/unknown").exchange().expectStatus().isUnauthorized().expectBody().returnResult();
+        anonymous.get().uri("/api/v1/admin-other").exchange().expectStatus().isNotFound().expectBody().returnResult();
     }
 
     @Test
@@ -303,7 +303,7 @@ class GateRepositoryTest {
         Gate scheduled = repository.findById(gate.getId()).orElseThrow();
         assertThat(scheduled.getOpensAt()).isEqualTo(opening);
         assertThat(scheduled.getClosesAt()).isEqualTo(closing);
-        client.put().uri(path).bodyValue(request).exchange().expectStatus().isEqualTo(409);
+        client.put().uri(path).bodyValue(request).exchange().expectStatus().isEqualTo(409).expectBody().returnResult();
         client.put().uri(path).bodyValue(new GateScheduleRequest(1L, null, null))
                 .exchange().expectStatus().isOk().expectBody()
                 .jsonPath("$.status").isEqualTo("DRAFT");
@@ -326,16 +326,16 @@ class GateRepositoryTest {
         };
         String path = "/api/v1/admin/gates/" + gate.getId() + "/schedule";
         for (GateScheduleRequest request : invalid) {
-            client.put().uri(path).bodyValue(request).exchange().expectStatus().isBadRequest();
+            client.put().uri(path).bodyValue(request).exchange().expectStatus().isBadRequest().expectBody().returnResult();
         }
         assertThat(repository.findById(gate.getId()).orElseThrow().getVersion()).isZero();
         client.put().uri("/api/v1/admin/gates/{id}/schedule", UUID.randomUUID())
                 .bodyValue(new GateScheduleRequest(0L, future, null))
-                .exchange().expectStatus().isNotFound();
+                .exchange().expectStatus().isNotFound().expectBody().returnResult();
         client.post().uri("/api/v1/admin/gates/{id}/open", gate.getId())
-                .exchange().expectStatus().isOk();
+                .exchange().expectStatus().isOk().expectBody().returnResult();
         client.put().uri(path).bodyValue(new GateScheduleRequest(1L, future, null))
-                .exchange().expectStatus().isEqualTo(409);
+                .exchange().expectStatus().isEqualTo(409).expectBody().returnResult();
         assertThat(repository.findById(gate.getId()).orElseThrow().getStatus()).isEqualTo(GateStatus.OPEN);
     }
 
@@ -354,9 +354,9 @@ class GateRepositoryTest {
                     .jsonPath("$.version").isEqualTo(index + 1);
         }
         client.post().uri("/api/v1/admin/gates/{id}/open", gate.getId())
-                .exchange().expectStatus().isEqualTo(409);
+                .exchange().expectStatus().isEqualTo(409).expectBody().returnResult();
         client.post().uri("/api/v1/admin/gates/{id}/pause", gate.getId())
-                .exchange().expectStatus().isEqualTo(409);
+                .exchange().expectStatus().isEqualTo(409).expectBody().returnResult();
         Gate closed = repository.findById(gate.getId()).orElseThrow();
         assertThat(closed.getStatus()).isEqualTo(GateStatus.CLOSED);
         assertThat(closed.getVersion()).isEqualTo(4);
@@ -366,13 +366,13 @@ class GateRepositoryTest {
     void rejectsPauseBeforeOpeningAndMissingGateCommands() {
         Gate gate = repository.saveAndFlush(new Gate("Draft", 10, 100, 300, 120));
         client.post().uri("/api/v1/admin/gates/{id}/pause", gate.getId())
-                .exchange().expectStatus().isEqualTo(409);
+                .exchange().expectStatus().isEqualTo(409).expectBody().returnResult();
         Gate draft = repository.findById(gate.getId()).orElseThrow();
         assertThat(draft.getStatus()).isEqualTo(GateStatus.DRAFT);
         assertThat(draft.getVersion()).isZero();
         for (String command : new String[]{"open", "pause", "close"}) {
             client.post().uri("/api/v1/admin/gates/" + UUID.randomUUID() + "/" + command)
-                    .exchange().expectStatus().isNotFound();
+                    .exchange().expectStatus().isNotFound().expectBody().returnResult();
         }
     }
 
@@ -406,7 +406,7 @@ class GateRepositoryTest {
 
         client.patch().uri("/api/v1/admin/gates/{id}", original.getId())
                 .bodyValue(new UpdateGateRequest(0L, "Stale", null, null, null, null))
-                .exchange().expectStatus().isEqualTo(409);
+                .exchange().expectStatus().isEqualTo(409).expectBody().returnResult();
         Gate unchanged = repository.findById(original.getId()).orElseThrow();
         assertThat(unchanged.getName()).isEqualTo("Renamed");
         assertThat(unchanged.getVersion()).isEqualTo(1);
@@ -424,11 +424,11 @@ class GateRepositoryTest {
         };
         for (UpdateGateRequest request : invalid) {
             client.patch().uri("/api/v1/admin/gates/{id}", gate.getId()).bodyValue(request)
-                    .exchange().expectStatus().isBadRequest();
+                    .exchange().expectStatus().isBadRequest().expectBody().returnResult();
         }
         client.patch().uri("/api/v1/admin/gates/{id}", UUID.randomUUID())
                 .bodyValue(new UpdateGateRequest(0L, "Missing", null, null, null, null))
-                .exchange().expectStatus().isNotFound();
+                .exchange().expectStatus().isNotFound().expectBody().returnResult();
         Gate unchanged = repository.findById(gate.getId()).orElseThrow();
         assertThat(unchanged.getName()).isEqualTo("Valid");
         assertThat(unchanged.getVersion()).isZero();
@@ -487,7 +487,7 @@ class GateRepositoryTest {
         String[] queries = {"page=-1", "size=0", "size=101", "page=invalid"};
         for (String query : queries) {
             client.get().uri("/api/v1/admin/gates?" + query).exchange()
-                    .expectStatus().isBadRequest();
+                    .expectStatus().isBadRequest().expectBody().returnResult();
         }
     }
 
@@ -515,11 +515,11 @@ class GateRepositoryTest {
         long count = repository.count();
         client.post().uri("/api/v1/admin/gates")
                 .bodyValue(new CreateGateRequest("Launch", 0, 100, 300, 120))
-                .exchange().expectStatus().isBadRequest();
+                .exchange().expectStatus().isBadRequest().expectBody().returnResult();
         client.get().uri("/api/v1/admin/gates/{id}", UUID.randomUUID())
-                .exchange().expectStatus().isNotFound();
+                .exchange().expectStatus().isNotFound().expectBody().returnResult();
         client.get().uri("/api/v1/admin/gates/not-a-uuid")
-                .exchange().expectStatus().isBadRequest();
+                .exchange().expectStatus().isBadRequest().expectBody().returnResult();
         assertThat(repository.count()).isEqualTo(count);
     }
 
