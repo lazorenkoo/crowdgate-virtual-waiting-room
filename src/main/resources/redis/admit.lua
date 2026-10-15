@@ -3,8 +3,23 @@ if redis.call('EXISTS', KEYS[6]) == 1 then
 end
 local time = redis.call('TIME')
 local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
-local capacity = tonumber(ARGV[2]) - redis.call('ZCARD', KEYS[7])
-local count = math.min(tonumber(ARGV[1]), capacity, 100)
+local expired = redis.call('ZRANGEBYSCORE', KEYS[7], '-inf', now, 'LIMIT', 0, 100)
+for _, token in ipairs(expired) do
+    local status = redis.call('HGET', KEYS[3], token)
+    if status == 'ADMITTED' then
+        redis.call('HSET', KEYS[3], token, 'EXPIRED')
+    end
+    if status ~= 'ACTIVE' then
+        redis.call('ZREM', KEYS[7], token)
+    end
+end
+local second = time[1]
+if redis.call('HGET', KEYS[8], 'second') ~= second then
+    redis.call('HSET', KEYS[8], 'second', second, 'count', 0)
+end
+local used = tonumber(redis.call('HGET', KEYS[8], 'count'))
+local capacity = tonumber(ARGV[2]) - redis.call('ZCARD', KEYS[7]) - redis.call('ZCARD', KEYS[9])
+local count = math.min(tonumber(ARGV[1]) - used, capacity, 100)
 local admitted = {}
 for i = 1, count do
     local first = redis.call('ZPOPMIN', KEYS[1], 1)
@@ -15,5 +30,8 @@ for i = 1, count do
     redis.call('HSET', KEYS[3], token, 'ADMITTED')
     redis.call('ZADD', KEYS[7], now + tonumber(ARGV[3]) * 1000, token)
     table.insert(admitted, token)
+end
+if #admitted > 0 then
+    redis.call('HINCRBY', KEYS[8], 'count', #admitted)
 end
 return admitted

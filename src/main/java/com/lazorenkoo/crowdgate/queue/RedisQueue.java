@@ -67,7 +67,8 @@ public class RedisQueue {
     private List<String> keys(UUID gateId) {
         String prefix = "cg:{" + gateId + "}:";
         return List.of(prefix + "waiting", prefix + "identities", prefix + "statuses",
-                prefix + "owners", prefix + "sequence", prefix + "closed", prefix + "reservations");
+                prefix + "owners", prefix + "sequence", prefix + "closed", prefix + "reservations",
+                prefix + "admission-window", prefix + "active");
     }
 
     public Mono<QueueEntry> status(String token, UUID userId) {
