@@ -42,6 +42,52 @@ class RedisQueueTest {
     }
 
     @Test
+    void sharesAdmissionBudgetAcrossCallsWithinRedisSecond() throws java.io.IOException {
+        UUID gate = UUID.randomUUID();
+        queue.join(gate, UUID.randomUUID()).block(Duration.ofSeconds(5));
+        String prefix = "cg:{" + gate + "}:";
+        var resource = new org.springframework.core.io.ClassPathResource("redis/admit.lua");
+        String source = resource.getContentAsString(java.nio.charset.StandardCharsets.UTF_8);
+        String setup = "redis.call('HSET', KEYS[8], 'second', redis.call('TIME')[1], 'count', ARGV[1])\n";
+        var script = new org.springframework.data.redis.core.script.DefaultRedisScript<java.util.List>(
+                setup + source, java.util.List.class);
+        var keys = java.util.List.of(prefix + "waiting", prefix + "identities", prefix + "statuses",
+                prefix + "owners", prefix + "sequence", prefix + "closed", prefix + "reservations",
+                prefix + "admission-window", prefix + "active");
+        var result = template.execute(script, keys, java.util.List.of("2", "10", "60"))
+                .single().block(Duration.ofSeconds(5));
+        assertThat(result).isEmpty();
+        assertThat(template.opsForZSet().size(prefix + "waiting").block(Duration.ofSeconds(5)))
+                .isEqualTo(1);
+        assertThat(template.opsForHash().get(prefix + "admission-window", "count")
+                .block(Duration.ofSeconds(5))).isEqualTo("2");
+    }
+
+    @Test
+    void expiresAdmittedReservationsAndCountsActiveSeats() {
+        UUID gate = UUID.randomUUID();
+        UUID user = UUID.randomUUID();
+        String prefix = "cg:{" + gate + "}:";
+        QueueEntry first = queue.join(gate, user).block(Duration.ofSeconds(5));
+        QueueEntry next = queue.join(gate, UUID.randomUUID()).block(Duration.ofSeconds(5));
+        assertThat(queue.admit(gate, 1, 1, 60).block(Duration.ofSeconds(5)))
+                .containsExactly(first.queueToken());
+        template.opsForZSet().add(prefix + "reservations", first.queueToken(), 0).block(Duration.ofSeconds(5));
+        template.opsForHash().put(prefix + "admission-window", "second", "0").block(Duration.ofSeconds(5));
+        template.opsForZSet().add(prefix + "active", "active-session", Double.MAX_VALUE)
+                .block(Duration.ofSeconds(5));
+        RedisQueue second = new RedisQueue(template);
+        assertThat(second.admit(gate, 1, 1, 60).block(Duration.ofSeconds(5))).isEmpty();
+        assertThat(queue.status(first.queueToken(), user).block(Duration.ofSeconds(5)).status())
+                .isEqualTo("EXPIRED");
+        template.opsForZSet().remove(prefix + "active", "active-session").block(Duration.ofSeconds(5));
+        assertThat(second.admit(gate, 1, 1, 60).block(Duration.ofSeconds(5)))
+                .containsExactly(next.queueToken());
+        assertThat(template.opsForZSet().size(prefix + "reservations").block(Duration.ofSeconds(5)))
+                .isEqualTo(1);
+    }
+
+    @Test
     void admitsFifoEntriesWithoutExceedingReservedCapacity() {
         UUID gate = UUID.randomUUID();
         UUID firstUser = UUID.randomUUID();
