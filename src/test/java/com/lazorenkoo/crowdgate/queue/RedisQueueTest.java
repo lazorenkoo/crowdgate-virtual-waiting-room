@@ -42,6 +42,50 @@ class RedisQueueTest {
     }
 
     @Test
+    void admitsFifoEntriesWithoutExceedingReservedCapacity() {
+        UUID gate = UUID.randomUUID();
+        UUID firstUser = UUID.randomUUID();
+        UUID secondUser = UUID.randomUUID();
+        UUID thirdUser = UUID.randomUUID();
+        QueueEntry first = queue.join(gate, firstUser).block(Duration.ofSeconds(5));
+        QueueEntry second = queue.join(gate, secondUser).block(Duration.ofSeconds(5));
+        QueueEntry third = queue.join(gate, thirdUser).block(Duration.ofSeconds(5));
+
+        var admitted = queue.admit(gate, 2, 2, 60).block(Duration.ofSeconds(5));
+        assertThat(admitted).containsExactly(first.queueToken(), second.queueToken());
+        for (var owner : java.util.Map.of(first.queueToken(), firstUser, second.queueToken(), secondUser)
+                .entrySet()) {
+            QueueEntry status = queue.status(owner.getKey(), owner.getValue()).block(Duration.ofSeconds(5));
+            assertThat(status.status()).isEqualTo("ADMITTED");
+            assertThat(status.position()).isZero();
+            assertThat(status.queueSize()).isEqualTo(1);
+        }
+        QueueEntry waiting = queue.status(third.queueToken(), thirdUser).block(Duration.ofSeconds(5));
+        assertThat(waiting.status()).isEqualTo("WAITING");
+        assertThat(waiting.position()).isEqualTo(1);
+        assertThat(queue.admit(gate, 2, 2, 60).block(Duration.ofSeconds(5))).isEmpty();
+        assertThat(template.opsForZSet().size("cg:{" + gate + "}:reservations")
+                .block(Duration.ofSeconds(5))).isEqualTo(2);
+        assertThat(queue.join(gate, firstUser).block(Duration.ofSeconds(5)).queueToken())
+                .isEqualTo(first.queueToken());
+    }
+
+    @Test
+    void doesNotAdmitClosedQueuesOrInvalidLimits() {
+        UUID gate = UUID.randomUUID();
+        UUID user = UUID.randomUUID();
+        QueueEntry entry = queue.join(gate, user).block(Duration.ofSeconds(5));
+        queue.close(gate).block(Duration.ofSeconds(5));
+        assertThat(queue.admit(gate, 5, 10, 60).block(Duration.ofSeconds(5))).isEmpty();
+        assertThat(queue.status(entry.queueToken(), user).block(Duration.ofSeconds(5)).status())
+                .isEqualTo("CANCELLED");
+        for (int[] limits : new int[][]{{0, 10, 60}, {1, 0, 60}, {1, 10, 0}, {-1, 10, 60}}) {
+            assertThatThrownBy(() -> queue.admit(gate, limits[0], limits[1], limits[2])
+                    .block(Duration.ofSeconds(5))).isInstanceOf(IllegalArgumentException.class);
+        }
+    }
+
+    @Test
     void concurrentJoinsCannotRecreateWaitingQueueAfterClose() {
         UUID gate = UUID.randomUUID();
         UUID seedUser = UUID.randomUUID();
