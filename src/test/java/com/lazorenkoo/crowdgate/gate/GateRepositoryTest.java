@@ -12,6 +12,7 @@ import org.springframework.test.web.reactive.server.WebTestClient;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.containers.GenericContainer;
 import com.lazorenkoo.crowdgate.queue.QueueEntry;
+import org.springframework.data.domain.PageRequest;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import java.util.UUID;
@@ -54,6 +55,42 @@ class GateRepositoryTest {
     @BeforeEach
     void authenticateClient() {
         client = client.mutate().defaultHeader("X-Admin-Key", "test-admin-key").build();
+    }
+
+    @Test
+    void persistsPendingCloseAndAcknowledgesWithoutChangingPublicVersion() {
+        Gate gate = repository.saveAndFlush(new Gate("Pending close", 10, 100, 300, 120));
+        assertThat(gate.isQueueClosePending()).isFalse();
+        gate.changeStatus(GateStatus.CLOSED);
+        gate = repository.saveAndFlush(gate);
+        Gate pending = repository.findById(gate.getId()).orElseThrow();
+        assertThat(pending.isQueueClosePending()).isTrue();
+        assertThat(repository.findPendingQueueCloses(PageRequest.of(0, 1000)))
+                .extracting(Gate::getId).contains(gate.getId());
+        assertThat(repository.findPendingQueueCloses(PageRequest.of(0, 1))).hasSize(1);
+        assertThat(repository.acknowledgeQueueClose(gate.getId())).isEqualTo(1);
+        assertThat(repository.acknowledgeQueueClose(gate.getId())).isZero();
+        Gate completed = repository.findById(gate.getId()).orElseThrow();
+        assertThat(completed.isQueueClosePending()).isFalse();
+        assertThat(completed.getStatus()).isEqualTo(GateStatus.CLOSED);
+        assertThat(completed.getVersion()).isEqualTo(pending.getVersion());
+        client.get().uri("/api/v1/admin/gates/{id}", gate.getId()).exchange()
+                .expectStatus().isOk().expectBody().jsonPath("$.queueClosePending").doesNotExist();
+    }
+
+    @Test
+    void scheduledClosePersistsPendingWorkInSameDatabaseUpdate() {
+        Instant now = Instant.parse("2035-01-01T10:00:00Z");
+        Gate gate = new Gate("Scheduled pending close", 10, 100, 300, 120);
+        gate.setSchedule(now.minusSeconds(120), now.minusSeconds(60));
+        UUID id = repository.saveAndFlush(gate).getId();
+        repository.closeDue(now);
+        Gate closed = repository.findById(id).orElseThrow();
+        assertThat(closed.getStatus()).isEqualTo(GateStatus.CLOSED);
+        assertThat(closed.isQueueClosePending()).isTrue();
+        assertThat(closed.getVersion()).isEqualTo(1);
+        repository.closeDue(now);
+        assertThat(repository.findById(id).orElseThrow().getVersion()).isEqualTo(1);
     }
 
     @Test
