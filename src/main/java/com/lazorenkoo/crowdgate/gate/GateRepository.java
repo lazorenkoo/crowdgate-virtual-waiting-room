@@ -36,6 +36,15 @@ public interface GateRepository extends JpaRepository<Gate, UUID> {
     @Query("select g from Gate g where g.queueClosePending = true order by g.id")
     List<Gate> findPendingQueueCloses(Pageable pageable);
 
+    @Query("""
+            select g from Gate g
+            where g.status = com.lazorenkoo.crowdgate.gate.GateStatus.OPEN
+                and (g.closesAt is null or g.closesAt > :now)
+                and (:after is null or g.id > :after)
+            order by g.id
+            """)
+    List<Gate> findAdmissionGates(@Param("now") Instant now, @Param("after") UUID after, Pageable pageable);
+
     @Transactional
     @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query("""
