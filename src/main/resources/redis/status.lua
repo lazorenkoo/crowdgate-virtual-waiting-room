@@ -9,14 +9,15 @@ if redis.call('EXISTS', KEYS[6]) == 1 and (status == 'WAITING' or status == 'ADM
     status = 'CANCELLED'
     redis.call('HSET', KEYS[3], ARGV[1], status)
 end
-if status == 'ADMITTED' then
-    local expires = redis.call('ZSCORE', KEYS[7], ARGV[1])
+if status == 'ADMITTED' or status == 'ACTIVE' then
+    local expiryKey = status == 'ACTIVE' and KEYS[9] or KEYS[7]
+    local expires = redis.call('ZSCORE', expiryKey, ARGV[1])
     local time = redis.call('TIME')
     local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
     if expires and tonumber(expires) <= now then
         status = 'EXPIRED'
         redis.call('HSET', KEYS[3], ARGV[1], status)
-        redis.call('ZREM', KEYS[7], ARGV[1])
+        redis.call('ZREM', expiryKey, ARGV[1])
     end
 end
 local rank = redis.call('ZRANK', KEYS[1], ARGV[1])

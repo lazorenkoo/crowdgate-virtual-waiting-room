@@ -3,6 +3,13 @@ if redis.call('EXISTS', KEYS[6]) == 1 then
 end
 local time = redis.call('TIME')
 local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+local expiredActive = redis.call('ZRANGEBYSCORE', KEYS[9], '-inf', now, 'LIMIT', 0, 100)
+for _, token in ipairs(expiredActive) do
+    if redis.call('HGET', KEYS[3], token) == 'ACTIVE' then
+        redis.call('HSET', KEYS[3], token, 'EXPIRED')
+    end
+    redis.call('ZREM', KEYS[9], token)
+end
 local expired = redis.call('ZRANGEBYSCORE', KEYS[7], '-inf', now, 'LIMIT', 0, 100)
 for _, token in ipairs(expired) do
     local status = redis.call('HGET', KEYS[3], token)
