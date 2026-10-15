@@ -63,6 +63,57 @@ class GateRepositoryTest {
     }
 
     @Test
+    void admissionRunnerAdmitsOnlyOpenGatesWithAvailableCapacity() {
+        UUID user = UUID.randomUUID();
+        var entries = new java.util.EnumMap<GateStatus, QueueEntry>(GateStatus.class);
+        for (GateStatus status : GateStatus.values()) {
+            Gate gate = new Gate("Admission " + status, 10, 1, 300, 120);
+            if (status == GateStatus.SCHEDULED) {
+                gate.setSchedule(Instant.now().plusSeconds(300), null);
+            } else if (status == GateStatus.PAUSED) {
+                gate.changeStatus(GateStatus.OPEN);
+                gate.changeStatus(status);
+            } else if (status != GateStatus.DRAFT) {
+                gate.changeStatus(status);
+            }
+            UUID id = repository.saveAndFlush(gate).getId();
+            entries.put(status, queue.join(id, user).block(Duration.ofSeconds(5)));
+            if (status == GateStatus.OPEN) {
+                queue.join(id, UUID.randomUUID()).block(Duration.ofSeconds(5));
+            }
+        }
+        new GateAdmissionRunner(repository, queue).run();
+        for (var entry : entries.entrySet()) {
+            QueueEntry current = queue.status(entry.getValue().queueToken(), user).block(Duration.ofSeconds(5));
+            assertThat(current.status()).isEqualTo(entry.getKey() == GateStatus.OPEN ? "ADMITTED" : "WAITING");
+            assertThat(current.position()).isEqualTo(entry.getKey() == GateStatus.OPEN ? 0 : 1);
+            if (entry.getKey() == GateStatus.OPEN) {
+                assertThat(current.queueSize()).isEqualTo(1);
+            }
+        }
+    }
+
+    @Test
+    void admissionQueryUsesUuidCursorAndExcludesExpiredGates() {
+        Instant now = Instant.now();
+        Gate expired = new Gate("Expired admission", 10, 10, 300, 120);
+        expired.setSchedule(now.minusSeconds(20), now.minusSeconds(10));
+        expired.changeStatus(GateStatus.OPEN);
+        UUID expiredId = repository.saveAndFlush(expired).getId();
+        Gate open = new Gate("Cursor admission", 10, 10, 300, 120);
+        open.changeStatus(GateStatus.OPEN);
+        UUID openId = repository.saveAndFlush(open).getId();
+        var all = repository.findAdmissionGates(now, null, PageRequest.of(0, 100));
+        assertThat(all).extracting(Gate::getId).contains(openId).doesNotContain(expiredId);
+        var first = repository.findAdmissionGates(now, null, PageRequest.of(0, 1));
+        assertThat(first).hasSize(1);
+        UUID cursor = first.getFirst().getId();
+        var remaining = repository.findAdmissionGates(now, cursor, PageRequest.of(0, 100));
+        assertThat(remaining).extracting(Gate::getId)
+                .containsExactlyElementsOf(all.stream().skip(1).map(Gate::getId).toList());
+    }
+
+    @Test
     void concurrentCloseSynchronizersSafelyAcknowledgeSameGate() throws Exception {
         Gate gate = new Gate("Parallel close recovery", 10, 100, 300, 120);
         gate.changeStatus(GateStatus.OPEN);
