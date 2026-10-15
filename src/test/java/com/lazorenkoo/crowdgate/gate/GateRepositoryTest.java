@@ -57,6 +57,9 @@ class GateRepositoryTest {
     @Autowired
     RedisQueue queue;
 
+    @Autowired
+    GateAdmissionService admission;
+
     @BeforeEach
     void authenticateClient() {
         client = client.mutate().defaultHeader("X-Admin-Key", "test-admin-key").build();
@@ -82,7 +85,7 @@ class GateRepositoryTest {
                 queue.join(id, UUID.randomUUID()).block(Duration.ofSeconds(5));
             }
         }
-        new GateAdmissionRunner(repository, queue).run();
+        new GateAdmissionRunner(repository, admission).run();
         for (var entry : entries.entrySet()) {
             QueueEntry current = queue.status(entry.getValue().queueToken(), user).block(Duration.ofSeconds(5));
             assertThat(current.status()).isEqualTo(entry.getKey() == GateStatus.OPEN ? "ADMITTED" : "WAITING");

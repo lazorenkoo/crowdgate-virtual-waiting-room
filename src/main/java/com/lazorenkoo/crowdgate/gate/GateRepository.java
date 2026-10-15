@@ -13,6 +13,10 @@ import java.util.List;
 
 public interface GateRepository extends JpaRepository<Gate, UUID> {
 
+    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+    @Query("select g from Gate g where g.id = :id")
+    java.util.Optional<Gate> findForAdmission(@Param("id") UUID id);
+
     @Transactional
     @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query("""
