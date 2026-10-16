@@ -42,6 +42,45 @@ class RedisQueueTest {
     }
 
     @Test
+    void expiryPathsRemoveOnlyExpiredSessionCredentials() {
+        for (String path : new String[]{"admit", "status", "join", "redeem"}) {
+            UUID gate = UUID.randomUUID();
+            UUID user = UUID.randomUUID();
+            UUID other = UUID.randomUUID();
+            QueueEntry entry = queue.join(gate, user).block(Duration.ofSeconds(5));
+            QueueEntry live = queue.join(gate, other).block(Duration.ofSeconds(5));
+            queue.admit(gate, 2, 2, 60).block(Duration.ofSeconds(5));
+            queue.redeem(entry.queueToken(), user, 60).block(Duration.ofSeconds(5));
+            queue.redeem(live.queueToken(), other, 60).block(Duration.ofSeconds(5));
+            QueueSession expired = queue.issueSession(entry.queueToken(), user).block(Duration.ofSeconds(5));
+            QueueSession retained = queue.issueSession(live.queueToken(), other).block(Duration.ofSeconds(5));
+            String prefix = "cg:{" + gate + "}:";
+            template.opsForZSet().add(prefix + "active", entry.queueToken(), 0).block(Duration.ofSeconds(5));
+            switch (path) {
+                case "admit" -> queue.admit(gate, 2, 2, 60).block(Duration.ofSeconds(5));
+                case "status" -> queue.status(entry.queueToken(), user).block(Duration.ofSeconds(5));
+                case "join" -> queue.join(gate, user).block(Duration.ofSeconds(5));
+                case "redeem" -> assertThatThrownBy(() -> queue.redeem(entry.queueToken(), user, 60)
+                        .block(Duration.ofSeconds(5))).isInstanceOfSatisfying(ResponseStatusException.class,
+                                error -> assertThat(error.getStatusCode().value()).isEqualTo(409));
+            }
+            assertThat(template.opsForHash().hasKey(prefix + "sessions-by-entry", entry.queueToken())
+                    .block(Duration.ofSeconds(5))).isFalse();
+            assertThat(template.opsForHash().hasKey(prefix + "session-entries", expired.sessionToken())
+                    .block(Duration.ofSeconds(5))).isFalse();
+            assertThat(template.opsForHash().size(prefix + "sessions-by-entry").block(Duration.ofSeconds(5)))
+                    .isEqualTo(1);
+            assertThat(template.opsForHash().size(prefix + "session-entries").block(Duration.ofSeconds(5)))
+                    .isEqualTo(1);
+            assertThatThrownBy(() -> queue.validateSession(expired.sessionToken(), user).block(Duration.ofSeconds(5)))
+                    .isInstanceOfSatisfying(ResponseStatusException.class,
+                            error -> assertThat(error.getStatusCode().value()).isEqualTo(401));
+            assertThat(queue.validateSession(retained.sessionToken(), other).block(Duration.ofSeconds(5)))
+                    .isEqualTo(retained);
+        }
+    }
+
+    @Test
     void heartbeatAtomicallyRejectsExpiredActiveEntry() {
         UUID gate = UUID.randomUUID();
         UUID user = UUID.randomUUID();
