@@ -1,4 +1,5 @@
 /target/
+/demo-backend/target/
 /.idea/
 /.vscode/
 *.iml
