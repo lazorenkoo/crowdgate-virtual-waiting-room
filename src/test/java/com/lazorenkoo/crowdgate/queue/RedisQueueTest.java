@@ -42,6 +42,57 @@ class RedisQueueTest {
     }
 
     @Test
+    void admissionClaimsUseActualReservationTimesAndOneNonceAcrossInstances() {
+        UUID gate = UUID.randomUUID();
+        UUID user = UUID.randomUUID();
+        QueueEntry entry = queue.join(gate, user).block(Duration.ofSeconds(5));
+        queue.admit(gate, 1, 1, 60).block(Duration.ofSeconds(5));
+        var claims = queue.admissionClaims(entry.queueToken(), user).block(Duration.ofSeconds(5));
+        assertThat(claims.gateId()).isEqualTo(gate);
+        assertThat(claims.sessionId().toString()).isEqualTo(entry.queueToken().split(":")[1]);
+        assertThat(Duration.between(claims.issuedAt(), claims.expiresAt())).isEqualTo(Duration.ofSeconds(60));
+        Double expires = template.opsForZSet().score("cg:{" + gate + "}:reservations", entry.queueToken())
+                .block(Duration.ofSeconds(5));
+        assertThat(claims.expiresAt().toEpochMilli()).isEqualTo(expires.longValue());
+        RedisQueue second = new RedisQueue(template);
+        var repeated = Flux.range(0, 100).flatMap(index -> (index % 2 == 0 ? queue : second)
+                .admissionClaims(entry.queueToken(), user), 16).collectList().block(Duration.ofSeconds(10));
+        assertThat(repeated).hasSize(100).allSatisfy(value -> assertThat(value).isEqualTo(claims));
+        assertThat(template.opsForZSet().score("cg:{" + gate + "}:reservations", entry.queueToken())
+                .block(Duration.ofSeconds(5))).isEqualTo(expires);
+        long changedExpiry = claims.expiresAt().plusSeconds(20).toEpochMilli();
+        template.opsForZSet().add("cg:{" + gate + "}:reservations", entry.queueToken(), changedExpiry)
+                .block(Duration.ofSeconds(5));
+        var changed = queue.admissionClaims(entry.queueToken(), user).block(Duration.ofSeconds(5));
+        assertThat(changed.expiresAt().toEpochMilli()).isEqualTo(changedExpiry);
+        assertThat(changed.issuedAt()).isEqualTo(claims.issuedAt());
+        assertThat(changed.nonce()).isEqualTo(claims.nonce());
+    }
+
+    @Test
+    void admissionClaimsRejectWaitingForeignExpiredAndClosedEntries() {
+        UUID gate = UUID.randomUUID();
+        UUID user = UUID.randomUUID();
+        QueueEntry entry = queue.join(gate, user).block(Duration.ofSeconds(5));
+        assertThatThrownBy(() -> queue.admissionClaims(entry.queueToken(), user).block(Duration.ofSeconds(5)))
+                .isInstanceOfSatisfying(ResponseStatusException.class,
+                        error -> assertThat(error.getStatusCode().value()).isEqualTo(409));
+        queue.admit(gate, 1, 1, 60).block(Duration.ofSeconds(5));
+        assertThatThrownBy(() -> queue.admissionClaims(entry.queueToken(), UUID.randomUUID())
+                .block(Duration.ofSeconds(5))).isInstanceOfSatisfying(ResponseStatusException.class,
+                        error -> assertThat(error.getStatusCode().value()).isEqualTo(404));
+        template.opsForZSet().add("cg:{" + gate + "}:reservations", entry.queueToken(), 0)
+                .block(Duration.ofSeconds(5));
+        assertThatThrownBy(() -> queue.admissionClaims(entry.queueToken(), user).block(Duration.ofSeconds(5)))
+                .isInstanceOfSatisfying(ResponseStatusException.class,
+                        error -> assertThat(error.getStatusCode().value()).isEqualTo(409));
+        queue.close(gate).block(Duration.ofSeconds(5));
+        assertThatThrownBy(() -> queue.admissionClaims(entry.queueToken(), user).block(Duration.ofSeconds(5)))
+                .isInstanceOfSatisfying(ResponseStatusException.class,
+                        error -> assertThat(error.getStatusCode().value()).isEqualTo(410));
+    }
+
+    @Test
     void expiryPathsRemoveOnlyExpiredSessionCredentials() {
         for (String path : new String[]{"admit", "status", "join", "redeem"}) {
             UUID gate = UUID.randomUUID();
