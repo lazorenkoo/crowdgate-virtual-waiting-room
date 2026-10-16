@@ -20,7 +20,7 @@ public class AdmissionTokenCodec {
 
     public AdmissionTokenCodec(ObjectMapper mapper, String secret) {
         byte[] bytes = secret.getBytes(StandardCharsets.UTF_8);
-        if (bytes.length < 32) {
+        if (secret.isBlank() || bytes.length < 32) {
             throw new IllegalArgumentException("Admission signing key must contain at least 32 bytes");
         }
         this.mapper = mapper;
@@ -48,7 +48,7 @@ public class AdmissionTokenCodec {
             }
             AdmissionClaims claims = mapper.readValue(Base64.getUrlDecoder().decode(parts[0]), AdmissionClaims.class);
             Instant now = Instant.now();
-            if (claims.gateId() == null || claims.sessionId() == null || claims.nonce() == null
+            if (claims == null || claims.gateId() == null || claims.sessionId() == null || claims.nonce() == null
                     || claims.issuedAt() == null || claims.expiresAt() == null
                     || claims.issuedAt().isAfter(now) || !claims.expiresAt().isAfter(now)
                     || !claims.expiresAt().isAfter(claims.issuedAt())) {
