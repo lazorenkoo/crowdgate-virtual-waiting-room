@@ -87,13 +87,28 @@ public class RedisQueue {
     }
 
     public Mono<QueueEntry> redeem(String token, UUID userId, int sessionTtlSeconds) {
+        return redeem(token, userId, sessionTtlSeconds, null);
+    }
+
+    public Mono<QueueEntry> redeemSigned(AdmissionClaims claims, UUID userId, int sessionTtlSeconds) {
+        if (claims.issuedAt().getNano() % 1_000_000 != 0 || claims.expiresAt().getNano() % 1_000_000 != 0) {
+            return Mono.error(new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid admission token"));
+        }
+        return redeem(claims.gateId() + ":" + claims.sessionId(), userId, sessionTtlSeconds, claims);
+    }
+
+    private Mono<QueueEntry> redeem(String token, UUID userId, int sessionTtlSeconds, AdmissionClaims claims) {
         return Mono.defer(() -> {
             UUID gateId = gateId(token);
             if (sessionTtlSeconds < 1) {
                 return Mono.error(new IllegalArgumentException("Session TTL must be positive"));
             }
-            return redis.execute(redeemScript, keys(gateId), List.of(token, userId.toString(),
-                            Integer.toString(sessionTtlSeconds)))
+            List<String> arguments = claims == null
+                    ? List.of(token, userId.toString(), Integer.toString(sessionTtlSeconds))
+                    : List.of(token, userId.toString(), Integer.toString(sessionTtlSeconds),
+                            claims.nonce().toString(), Long.toString(claims.issuedAt().toEpochMilli()),
+                            Long.toString(claims.expiresAt().toEpochMilli()));
+            return redis.execute(redeemScript, keys(gateId), arguments)
                     .single().map(result -> {
                         if (result.size() == 1) {
                             int code = Integer.parseInt(result.getFirst().toString());
@@ -186,7 +201,8 @@ public class RedisQueue {
         return List.of(prefix + "waiting", prefix + "identities", prefix + "statuses",
                 prefix + "owners", prefix + "sequence", prefix + "closed", prefix + "reservations",
                 prefix + "admission-window", prefix + "active", prefix + "sessions-by-entry",
-                prefix + "session-entries", prefix + "admission-issued-at", prefix + "admission-nonces");
+                prefix + "session-entries", prefix + "admission-issued-at", prefix + "admission-nonces",
+                prefix + "admission-expires-at");
     }
 
     public Mono<QueueEntry> status(String token, UUID userId) {

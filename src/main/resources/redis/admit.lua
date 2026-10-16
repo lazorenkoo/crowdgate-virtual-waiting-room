@@ -41,6 +41,7 @@ for i = 1, count do
     local token = first[1]
     redis.call('HSET', KEYS[3], token, 'ADMITTED')
     redis.call('HSET', KEYS[12], token, now)
+    redis.call('HSET', KEYS[14], token, now + tonumber(ARGV[3]) * 1000)
     redis.call('ZADD', KEYS[7], now + tonumber(ARGV[3]) * 1000, token)
     table.insert(admitted, token)
 end

@@ -5,6 +5,12 @@ end
 local status = redis.call('HGET', KEYS[3], token)
 local time = redis.call('TIME')
 local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+if ARGV[4] and (redis.call('HGET', KEYS[13], token) ~= ARGV[4]
+        or redis.call('HGET', KEYS[12], token) ~= ARGV[5]
+        or redis.call('HGET', KEYS[14], token) ~= ARGV[6]
+        or tonumber(ARGV[6]) <= now) then
+    return {'401'}
+end
 if status == 'ACTIVE' then
     local expires = redis.call('ZSCORE', KEYS[9], token)
     if not expires or tonumber(expires) <= now then
