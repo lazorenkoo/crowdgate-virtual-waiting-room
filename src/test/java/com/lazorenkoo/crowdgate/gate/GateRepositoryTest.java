@@ -76,6 +76,66 @@ class GateRepositoryTest {
     }
 
     @Test
+    void signedTokenRedemptionChecksSignatureOwnerAndClaimsBeforeActivation() {
+        Gate gate = new Gate("Signed activation", 10, 10, 123, 60);
+        gate.changeStatus(GateStatus.OPEN);
+        UUID id = repository.saveAndFlush(gate).getId();
+        UUID user = UUID.randomUUID();
+        QueueEntry entry = queue.join(id, user).block(Duration.ofSeconds(5));
+        queue.admit(id, 10, 10, 60).block(Duration.ofSeconds(5));
+        var claims = queue.admissionClaims(entry.queueToken(), user).block(Duration.ofSeconds(5));
+        String token = tokenCodec.sign(claims);
+        var altered = new com.lazorenkoo.crowdgate.token.AdmissionClaims(id, claims.sessionId(),
+                claims.issuedAt(), claims.expiresAt(), UUID.randomUUID());
+        for (String invalid : new String[]{"invalid", token + "x", tokenCodec.sign(altered)}) {
+            client.post().uri("/api/v1/tokens/redeem").cookie("cg_user_id", user.toString())
+                    .bodyValue(Map.of("admissionToken", invalid)).exchange()
+                    .expectStatus().isUnauthorized().expectCookie().doesNotExist("cg_session")
+                    .expectBody().returnResult();
+        }
+        assertThat(queue.status(entry.queueToken(), user).block(Duration.ofSeconds(5)).status())
+                .isEqualTo("ADMITTED");
+        client.post().uri("/api/v1/tokens/redeem").cookie("cg_user_id", UUID.randomUUID().toString())
+                .bodyValue(Map.of("admissionToken", token)).exchange()
+                .expectStatus().isNotFound().expectBody().returnResult();
+        client.post().uri("/api/v1/tokens/redeem").bodyValue(Map.of("admissionToken", token)).exchange()
+                .expectStatus().isNotFound().expectBody().returnResult();
+        var active = client.post().uri("/api/v1/tokens/redeem").cookie("cg_user_id", user.toString())
+                .bodyValue(Map.of("admissionToken", token)).exchange().expectStatus().isOk()
+                .expectHeader().valueEquals("Cache-Control", "no-store").expectCookie().httpOnly("cg_session", true)
+                .expectBody().jsonPath("$.status").isEqualTo("ACTIVE").returnResult();
+        String credential = active.getResponseCookies().getFirst("cg_session").getValue();
+        Double expiry = redisTemplate.opsForZSet().score("cg:{" + id + "}:active", entry.queueToken())
+                .block(Duration.ofSeconds(5));
+        client.post().uri("/api/v1/tokens/redeem").cookie("cg_user_id", user.toString())
+                .bodyValue(Map.of("admissionToken", token)).exchange().expectStatus().isOk()
+                .expectCookie().valueEquals("cg_session", credential).expectBody().returnResult();
+        assertThat(redisTemplate.opsForZSet().score("cg:{" + id + "}:active", entry.queueToken())
+                .block(Duration.ofSeconds(5))).isEqualTo(expiry);
+    }
+
+    @Test
+    void signedTokenRedemptionRejectsClosedGateAndExpiredToken() {
+        Gate gate = new Gate("Closed signed activation", 10, 10, 123, 60);
+        gate.changeStatus(GateStatus.OPEN);
+        UUID id = repository.saveAndFlush(gate).getId();
+        UUID user = UUID.randomUUID();
+        QueueEntry entry = queue.join(id, user).block(Duration.ofSeconds(5));
+        queue.admit(id, 10, 10, 60).block(Duration.ofSeconds(5));
+        var claims = queue.admissionClaims(entry.queueToken(), user).block(Duration.ofSeconds(5));
+        gate.changeStatus(GateStatus.CLOSED);
+        repository.saveAndFlush(gate);
+        client.post().uri("/api/v1/tokens/redeem").cookie("cg_user_id", user.toString())
+                .bodyValue(Map.of("admissionToken", tokenCodec.sign(claims))).exchange()
+                .expectStatus().isEqualTo(410).expectBody().returnResult();
+        var expired = new com.lazorenkoo.crowdgate.token.AdmissionClaims(id, claims.sessionId(),
+                Instant.now().minusSeconds(120), Instant.now().minusSeconds(60), claims.nonce());
+        client.post().uri("/api/v1/tokens/redeem").cookie("cg_user_id", user.toString())
+                .bodyValue(Map.of("admissionToken", tokenCodec.sign(expired))).exchange()
+                .expectStatus().isUnauthorized().expectBody().returnResult();
+    }
+
+    @Test
     void issuesStableSignedAdmissionTokenOnlyToAdmittedOwner() {
         Gate gate = new Gate("Signed admission", 10, 10, 123, 60);
         gate.changeStatus(GateStatus.OPEN);
