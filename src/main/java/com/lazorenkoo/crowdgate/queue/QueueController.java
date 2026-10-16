@@ -2,6 +2,9 @@ package com.lazorenkoo.crowdgate.queue;
 
 import com.lazorenkoo.crowdgate.gate.GateService;
 import com.lazorenkoo.crowdgate.gate.GateStatus;
+import com.lazorenkoo.crowdgate.token.AdmissionClaims;
+import com.lazorenkoo.crowdgate.token.AdmissionTokenCodec;
+import com.lazorenkoo.crowdgate.token.AdmissionTokenRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseCookie;
 import org.springframework.http.HttpCookie;
@@ -10,6 +13,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.server.ResponseStatusException;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
@@ -25,11 +29,13 @@ public class QueueController {
     private final GateService gates;
     private final RedisQueue queue;
     private final UserIdentity identity;
+    private final AdmissionTokenCodec tokens;
 
-    public QueueController(GateService gates, RedisQueue queue, UserIdentity identity) {
+    public QueueController(GateService gates, RedisQueue queue, UserIdentity identity, AdmissionTokenCodec tokens) {
         this.gates = gates;
         this.queue = queue;
         this.identity = identity;
+        this.tokens = tokens;
     }
 
     @PostMapping("/gates/{gateId}/join")
@@ -54,13 +60,29 @@ public class QueueController {
     @PostMapping("/queue/{queueToken}/redeem")
     public Mono<QueueEntry> redeem(@PathVariable String queueToken, ServerWebExchange exchange) {
         UUID user = identity.resolve(exchange);
+        return redeem(queueToken, user, null, exchange);
+    }
+
+    @PostMapping("/tokens/redeem")
+    public Mono<QueueEntry> redeemToken(@RequestBody AdmissionTokenRequest request, ServerWebExchange exchange) {
+        exchange.getResponse().getHeaders().setCacheControl("no-store");
+        return Mono.defer(() -> {
+            AdmissionClaims claims = tokens.verify(request.admissionToken());
+            return redeem(claims.gateId() + ":" + claims.sessionId(), identity.resolve(exchange), claims, exchange);
+        });
+    }
+
+    private Mono<QueueEntry> redeem(String queueToken, UUID user, AdmissionClaims claims, ServerWebExchange exchange) {
         return queue.status(queueToken, user)
                 .flatMap(entry -> gates.findById(queue.gateId(queueToken)))
                 .flatMap(gate -> {
                     boolean closed = gate.getStatus() == GateStatus.CLOSED || gate.getClosesAt() != null
                             && !gate.getClosesAt().isAfter(Instant.now());
                     Mono<Void> synchronize = closed ? queue.close(gate.getId()) : Mono.empty();
-                    return synchronize.then(queue.redeem(queueToken, user, gate.getSessionTtlSeconds()))
+                    Mono<QueueEntry> activation = claims == null
+                            ? queue.redeem(queueToken, user, gate.getSessionTtlSeconds())
+                            : queue.redeemSigned(claims, user, gate.getSessionTtlSeconds());
+                    return synchronize.then(activation)
                             .flatMap(entry -> queue.issueSession(queueToken, user).map(session -> {
                                 setSessionCookie(exchange, gate.getId(), session);
                                 return entry;
