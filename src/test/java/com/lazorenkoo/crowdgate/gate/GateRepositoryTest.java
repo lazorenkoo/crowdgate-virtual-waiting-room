@@ -62,6 +62,9 @@ class GateRepositoryTest {
     GateAdmissionService admission;
 
     @Autowired
+    com.lazorenkoo.crowdgate.token.AdmissionTokenCodec tokenCodec;
+
+    @Autowired
     org.springframework.data.redis.core.ReactiveStringRedisTemplate redisTemplate;
 
     @Autowired
@@ -70,6 +73,56 @@ class GateRepositoryTest {
     @BeforeEach
     void authenticateClient() {
         client = client.mutate().defaultHeader("X-Admin-Key", "test-admin-key").build();
+    }
+
+    @Test
+    void issuesStableSignedAdmissionTokenOnlyToAdmittedOwner() {
+        Gate gate = new Gate("Signed admission", 10, 10, 123, 60);
+        gate.changeStatus(GateStatus.OPEN);
+        UUID id = repository.saveAndFlush(gate).getId();
+        UUID user = UUID.randomUUID();
+        QueueEntry entry = queue.join(id, user).block(Duration.ofSeconds(5));
+        String path = "/api/v1/queue/" + entry.queueToken() + "/admission-token";
+        client.post().uri(path).cookie("cg_user_id", user.toString()).exchange()
+                .expectStatus().isEqualTo(409).expectBody().returnResult();
+        queue.admit(id, 10, 10, 60).block(Duration.ofSeconds(5));
+        var response = client.post().uri(path).cookie("cg_user_id", user.toString()).exchange()
+                .expectStatus().isOk().expectHeader().valueEquals("Cache-Control", "no-store")
+                .expectBody(com.lazorenkoo.crowdgate.token.AdmissionTokenResponse.class)
+                .returnResult().getResponseBody();
+        var claims = tokenCodec.verify(response.admissionToken());
+        assertThat(claims.gateId()).isEqualTo(id);
+        assertThat(claims.sessionId().toString()).isEqualTo(entry.queueToken().split(":")[1]);
+        assertThat(claims.expiresAt()).isEqualTo(response.expiresAt());
+        assertThat(Duration.between(claims.issuedAt(), claims.expiresAt())).isEqualTo(Duration.ofSeconds(60));
+        var repeated = client.post().uri(path).cookie("cg_user_id", user.toString()).exchange()
+                .expectStatus().isOk().expectBody(com.lazorenkoo.crowdgate.token.AdmissionTokenResponse.class)
+                .returnResult().getResponseBody();
+        assertThat(repeated).isEqualTo(response);
+        client.post().uri(path).cookie("cg_user_id", UUID.randomUUID().toString()).exchange()
+                .expectStatus().isNotFound().expectBody().returnResult();
+        client.post().uri(path).exchange().expectStatus().isNotFound().expectBody().returnResult();
+        client.post().uri("/api/v1/tokens/validate").bodyValue(Map.of("admissionToken", response.admissionToken()))
+                .exchange().expectStatus().isOk().expectHeader().valueEquals("Cache-Control", "no-store")
+                .expectBody().jsonPath("$.gateId").isEqualTo(id.toString())
+                .jsonPath("$.sessionId").isEqualTo(claims.sessionId().toString());
+    }
+
+    @Test
+    void tokenValidationRejectsTamperedExpiredMissingAndBrokenInput() {
+        Instant now = Instant.now().minusSeconds(120);
+        var claims = new com.lazorenkoo.crowdgate.token.AdmissionClaims(UUID.randomUUID(), UUID.randomUUID(),
+                now, now.plusSeconds(60), UUID.randomUUID());
+        String expired = tokenCodec.sign(claims);
+        for (String token : new String[]{expired, "invalid", expired + "x"}) {
+            client.post().uri("/api/v1/tokens/validate").bodyValue(Map.of("admissionToken", token)).exchange()
+                    .expectStatus().isUnauthorized().expectBody()
+                    .jsonPath("$.message").isEqualTo("Invalid admission token");
+        }
+        client.post().uri("/api/v1/tokens/validate").bodyValue(Map.of()).exchange()
+                .expectStatus().isUnauthorized().expectBody().returnResult();
+        client.post().uri("/api/v1/tokens/validate").contentType(org.springframework.http.MediaType.APPLICATION_JSON)
+                .bodyValue("{").exchange().expectStatus().isBadRequest().expectBody().returnResult();
     }
 
     @Test
