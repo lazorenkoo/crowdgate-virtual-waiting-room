@@ -1,5 +1,7 @@
 package com.lazorenkoo.crowdgate.queue;
 
+import com.lazorenkoo.crowdgate.token.AdmissionClaims;
+
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
@@ -12,6 +14,7 @@ import java.util.List;
 import java.util.UUID;
 import java.util.Base64;
 import java.security.SecureRandom;
+import java.time.Instant;
 
 @Component
 public class RedisQueue {
@@ -24,6 +27,7 @@ public class RedisQueue {
     private final DefaultRedisScript<List> redeemScript;
     private final DefaultRedisScript<List> issueSessionScript;
     private final DefaultRedisScript<List> validateSessionScript;
+    private final DefaultRedisScript<List> readAdmissionScript;
     private final SecureRandom random = new SecureRandom();
 
     public RedisQueue(ReactiveStringRedisTemplate redis) {
@@ -49,6 +53,9 @@ public class RedisQueue {
         validateSessionScript = new DefaultRedisScript<>();
         validateSessionScript.setLocation(new ClassPathResource("redis/validate-session.lua"));
         validateSessionScript.setResultType(List.class);
+        readAdmissionScript = new DefaultRedisScript<>();
+        readAdmissionScript.setLocation(new ClassPathResource("redis/read-admission.lua"));
+        readAdmissionScript.setResultType(List.class);
     }
 
     public Mono<QueueEntry> join(UUID gateId, UUID userId) {
@@ -155,12 +162,31 @@ public class RedisQueue {
         }
     }
 
+    public Mono<AdmissionClaims> admissionClaims(String token, UUID userId) {
+        return Mono.defer(() -> {
+            UUID gate = gateId(token);
+            UUID session = UUID.fromString(token.substring(token.indexOf(':') + 1));
+            return redis.execute(readAdmissionScript, keys(gate),
+                            List.of(token, userId.toString(), UUID.randomUUID().toString()))
+                    .single().map(result -> {
+                        if (result.size() == 1) {
+                            int code = Integer.parseInt(result.getFirst().toString());
+                            throw new ResponseStatusException(HttpStatus.valueOf(code), "Admission is not available");
+                        }
+                        return new AdmissionClaims(gate, session,
+                                Instant.ofEpochMilli(Long.parseLong(result.get(0).toString())),
+                                Instant.ofEpochMilli(Long.parseLong(result.get(1).toString())),
+                                UUID.fromString(result.get(2).toString()));
+                    });
+        });
+    }
+
     private List<String> keys(UUID gateId) {
         String prefix = "cg:{" + gateId + "}:";
         return List.of(prefix + "waiting", prefix + "identities", prefix + "statuses",
                 prefix + "owners", prefix + "sequence", prefix + "closed", prefix + "reservations",
                 prefix + "admission-window", prefix + "active", prefix + "sessions-by-entry",
-                prefix + "session-entries");
+                prefix + "session-entries", prefix + "admission-issued-at", prefix + "admission-nonces");
     }
 
     public Mono<QueueEntry> status(String token, UUID userId) {
