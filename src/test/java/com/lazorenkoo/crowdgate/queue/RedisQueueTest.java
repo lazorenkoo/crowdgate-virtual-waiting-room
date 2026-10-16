@@ -14,6 +14,7 @@ import java.time.Duration;
 import java.util.UUID;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import com.lazorenkoo.crowdgate.token.AdmissionClaims;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -39,6 +40,60 @@ class RedisQueueTest {
     @AfterAll
     static void disconnect() {
         connection.destroy();
+    }
+
+    @Test
+    void signedRedemptionRejectsAlteredClaimsWithoutChangingAdmission() {
+        UUID gate = UUID.randomUUID();
+        UUID user = UUID.randomUUID();
+        QueueEntry entry = queue.join(gate, user).block(Duration.ofSeconds(5));
+        queue.admit(gate, 1, 1, 60).block(Duration.ofSeconds(5));
+        AdmissionClaims claims = queue.admissionClaims(entry.queueToken(), user).block(Duration.ofSeconds(5));
+        for (AdmissionClaims altered : new AdmissionClaims[]{
+                new AdmissionClaims(gate, claims.sessionId(), claims.issuedAt(), claims.expiresAt(), UUID.randomUUID()),
+                new AdmissionClaims(gate, claims.sessionId(), claims.issuedAt().plusMillis(1), claims.expiresAt(), claims.nonce()),
+                new AdmissionClaims(gate, claims.sessionId(), claims.issuedAt(), claims.expiresAt().plusMillis(1), claims.nonce()),
+                new AdmissionClaims(gate, claims.sessionId(), claims.issuedAt().plusNanos(1), claims.expiresAt(), claims.nonce())}) {
+            assertThatThrownBy(() -> queue.redeemSigned(altered, user, 120).block(Duration.ofSeconds(5)))
+                    .isInstanceOfSatisfying(ResponseStatusException.class,
+                            error -> assertThat(error.getStatusCode().value()).isEqualTo(401));
+            assertThat(queue.status(entry.queueToken(), user).block(Duration.ofSeconds(5)).status())
+                    .isEqualTo("ADMITTED");
+        }
+        assertThatThrownBy(() -> queue.redeemSigned(claims, UUID.randomUUID(), 120).block(Duration.ofSeconds(5)))
+                .isInstanceOfSatisfying(ResponseStatusException.class,
+                        error -> assertThat(error.getStatusCode().value()).isEqualTo(404));
+        AdmissionClaims another = new AdmissionClaims(gate, UUID.randomUUID(), claims.issuedAt(),
+                claims.expiresAt(), claims.nonce());
+        assertThatThrownBy(() -> queue.redeemSigned(another, user, 120).block(Duration.ofSeconds(5)))
+                .isInstanceOfSatisfying(ResponseStatusException.class,
+                        error -> assertThat(error.getStatusCode().value()).isEqualTo(404));
+        template.opsForZSet().add("cg:{" + gate + "}:reservations", entry.queueToken(), 0)
+                .block(Duration.ofSeconds(5));
+        assertThatThrownBy(() -> queue.redeemSigned(claims, user, 120).block(Duration.ofSeconds(5)))
+                .isInstanceOfSatisfying(ResponseStatusException.class,
+                        error -> assertThat(error.getStatusCode().value()).isEqualTo(409));
+    }
+
+    @Test
+    void concurrentSignedRedemptionReservesOneActiveSlotWithoutExtendingExpiry() {
+        UUID gate = UUID.randomUUID();
+        UUID user = UUID.randomUUID();
+        QueueEntry entry = queue.join(gate, user).block(Duration.ofSeconds(5));
+        queue.admit(gate, 1, 1, 60).block(Duration.ofSeconds(5));
+        AdmissionClaims claims = queue.admissionClaims(entry.queueToken(), user).block(Duration.ofSeconds(5));
+        QueueEntry active = queue.redeemSigned(claims, user, 120).block(Duration.ofSeconds(5));
+        assertThat(active.status()).isEqualTo("ACTIVE");
+        String prefix = "cg:{" + gate + "}:";
+        Double expiry = template.opsForZSet().score(prefix + "active", entry.queueToken()).block(Duration.ofSeconds(5));
+        RedisQueue second = new RedisQueue(template);
+        var results = Flux.range(0, 100).flatMap(index -> (index % 2 == 0 ? queue : second)
+                .redeemSigned(claims, user, 300), 16).collectList().block(Duration.ofSeconds(10));
+        assertThat(results).hasSize(100).allSatisfy(value -> assertThat(value).isEqualTo(active));
+        assertThat(template.opsForZSet().size(prefix + "active").block(Duration.ofSeconds(5))).isEqualTo(1);
+        assertThat(template.opsForZSet().size(prefix + "reservations").block(Duration.ofSeconds(5))).isZero();
+        assertThat(template.opsForZSet().score(prefix + "active", entry.queueToken()).block(Duration.ofSeconds(5)))
+                .isEqualTo(expiry);
     }
 
     @Test
