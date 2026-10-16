@@ -18,6 +18,11 @@ if status == 'ADMITTED' or status == 'ACTIVE' then
         status = 'EXPIRED'
         redis.call('HSET', KEYS[3], ARGV[1], status)
         redis.call('ZREM', expiryKey, ARGV[1])
+        local credential = redis.call('HGET', KEYS[10], ARGV[1])
+        if credential then
+            redis.call('HDEL', KEYS[11], credential)
+            redis.call('HDEL', KEYS[10], ARGV[1])
+        end
     end
 end
 local rank = redis.call('ZRANK', KEYS[1], ARGV[1])

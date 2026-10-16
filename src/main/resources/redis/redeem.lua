@@ -10,6 +10,11 @@ if status == 'ACTIVE' then
     if not expires or tonumber(expires) <= now then
         redis.call('HSET', KEYS[3], token, 'EXPIRED')
         redis.call('ZREM', KEYS[9], token)
+        local credential = redis.call('HGET', KEYS[10], token)
+        if credential then
+            redis.call('HDEL', KEYS[11], credential)
+            redis.call('HDEL', KEYS[10], token)
+        end
         return {'409'}
     end
 else
