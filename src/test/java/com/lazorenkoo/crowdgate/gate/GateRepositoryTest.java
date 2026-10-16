@@ -29,7 +29,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-        properties = {"crowdgate.schedule.enabled=false", "crowdgate.admin.key=test-admin-key",
+        properties = {"crowdgate.requests.burst=100000", "crowdgate.requests.refill=100000",
+                "crowdgate.schedule.enabled=false", "crowdgate.admin.key=test-admin-key",
                 "crowdgate.admission.signing-key=test-signing-key-with-at-least-32-bytes"})
 @Testcontainers
 class GateRepositoryTest {
