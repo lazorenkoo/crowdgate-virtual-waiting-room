@@ -48,7 +48,7 @@ public class QueueMetricsCollector {
                 .baseUnit("seconds").register(registry);
     }
 
-    @Scheduled(fixedDelayString = "${crowdgate.metrics.delay-ms:5000}")
+    @Scheduled(scheduler = "metricsScheduler", fixedDelayString = "${crowdgate.metrics.delay-ms:5000}")
     public synchronized void collect() {
         try {
             var gates = repository.findMetricGateIds(cursor, PageRequest.of(0, 25));
