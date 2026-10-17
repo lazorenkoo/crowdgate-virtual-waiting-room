@@ -78,6 +78,59 @@ class GateRepositoryTest {
     }
 
     @Test
+    void metricGateQueryIncludesEveryStatusAndSupportsUuidCursor() {
+        var created = new java.util.ArrayList<UUID>();
+        for (GateStatus status : new GateStatus[]{GateStatus.DRAFT, GateStatus.OPEN,
+                GateStatus.PAUSED, GateStatus.CLOSED}) {
+            Gate gate = new Gate("Metric selection", 1, 1, 60, 30);
+            if (status != GateStatus.DRAFT) {
+                gate.changeStatus(GateStatus.OPEN);
+                if (status != GateStatus.OPEN) {
+                    gate.changeStatus(status);
+                }
+            }
+            created.add(repository.saveAndFlush(gate).getId());
+        }
+        var all = repository.findMetricGateIds(null, PageRequest.of(0, 1000));
+        assertThat(all).containsAll(created);
+        assertThat(repository.findMetricGateIds(null, PageRequest.of(0, 1))).containsExactly(all.getFirst());
+        assertThat(repository.findMetricGateIds(all.getFirst(), PageRequest.of(0, 1)))
+                .containsExactly(all.get(1));
+        assertThat(repository.findMetricGateIds(all.getLast(), PageRequest.of(0, 1))).isEmpty();
+    }
+
+    @Test
+    void metricLuaExcludesExpiredSlotsWithoutDeletingRedisState() {
+        UUID gate = UUID.randomUUID();
+        String prefix = "cg:{" + gate + "}:";
+        String seed = "local t=redis.call('TIME'); local n=t[1]*1000+math.floor(t[2]/1000); "
+                + "redis.call('ZADD',KEYS[1],1,'first',2,'second'); "
+                + "redis.call('ZADD',KEYS[2],0,'expired',n+60000,'live'); "
+                + "redis.call('ZADD',KEYS[3],0,'expired',n+60000,'live'); return 1";
+        redisTemplate.execute(new org.springframework.data.redis.core.script.DefaultRedisScript<>(seed, Long.class),
+                java.util.List.of(prefix + "waiting", prefix + "reservations", prefix + "active"))
+                .blockLast(Duration.ofSeconds(5));
+        GateRepository selected = org.mockito.Mockito.mock(GateRepository.class);
+        org.mockito.Mockito.when(selected.findMetricGateIds(null, PageRequest.of(0, 25)))
+                .thenReturn(java.util.List.of(gate));
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        try {
+            var collector = new com.lazorenkoo.crowdgate.metrics.QueueMetricsCollector(
+                    selected, redisTemplate, registry);
+            collector.collect();
+            assertThat(registry.get("crowdgate.queue.size").gauge().value()).isEqualTo(2);
+            assertThat(registry.get("crowdgate.reserved.slots").gauge().value()).isEqualTo(1);
+            assertThat(registry.get("crowdgate.active.sessions").gauge().value()).isEqualTo(1);
+            for (String key : new String[]{"waiting", "reservations", "active"}) {
+                assertThat(redisTemplate.opsForZSet().size(prefix + key).block(Duration.ofSeconds(5)))
+                        .isEqualTo(2);
+            }
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
     void prometheusRequiresAdminKeyAndExportsRuntimeAndHttpMetrics() {
         WebTestClient anonymous = client.mutate().defaultHeaders(headers -> headers.remove("X-Admin-Key")).build();
         anonymous.get().uri("/actuator/prometheus").exchange().expectStatus().isUnauthorized();
