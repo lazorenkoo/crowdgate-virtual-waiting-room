@@ -64,7 +64,9 @@ class RedisQueueTest {
             assertThat(registry.get("crowdgate.join").counter().count()).isEqualTo(3);
             assertThat(measured.admit(gate, 10, 1, 60).block(Duration.ofSeconds(5))).isEmpty();
             assertThat(registry.get("crowdgate.admitted").counter().count()).isEqualTo(1);
-            assertThat(registry.getMeters()).allSatisfy(meter -> assertThat(meter.getId().getTags()).isEmpty());
+            assertThat(registry.getMeters()).filteredOn(meter -> meter.getId().getName().equals("crowdgate.join")
+                    || meter.getId().getName().equals("crowdgate.admitted"))
+                    .allSatisfy(meter -> assertThat(meter.getId().getTags()).isEmpty());
         } finally {
             registry.close();
         }

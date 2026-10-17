@@ -4,11 +4,13 @@ import com.lazorenkoo.crowdgate.token.AdmissionClaims;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Metrics;
+import io.micrometer.core.instrument.Timer;
 import org.springframework.beans.factory.annotation.Autowired;
 
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.server.ResponseStatusException;
@@ -35,6 +37,7 @@ public class RedisQueue {
     private final SecureRandom random = new SecureRandom();
     private final Counter joins;
     private final Counter admitted;
+    private final MeterRegistry registry;
 
     public RedisQueue(ReactiveStringRedisTemplate redis) {
         this(redis, Metrics.globalRegistry);
@@ -43,6 +46,7 @@ public class RedisQueue {
     @Autowired
     public RedisQueue(ReactiveStringRedisTemplate redis, MeterRegistry registry) {
         this.redis = redis;
+        this.registry = registry;
         joins = Counter.builder("crowdgate.join").description("Successful join requests, including retries")
                 .register(registry);
         admitted = Counter.builder("crowdgate.admitted").description("Queue entries admitted by this instance")
@@ -76,15 +80,15 @@ public class RedisQueue {
     public Mono<QueueEntry> join(UUID gateId, UUID userId) {
         return Mono.defer(() -> {
             String token = gateId + ":" + UUID.randomUUID();
-            return redis.execute(joinScript, keys(gateId), List.of(userId.toString(), token))
-                    .single().flatMap(result -> result.isEmpty()
+            return execute("join", joinScript, keys(gateId), List.of(userId.toString(), token))
+                    .flatMap(result -> result.isEmpty()
                             ? Mono.error(new ResponseStatusException(HttpStatus.GONE, "Gate is closed"))
                             : Mono.just(entry(result))).doOnNext(value -> joins.increment());
         });
     }
 
     public Mono<Void> close(UUID gateId) {
-        return redis.execute(closeScript, keys(gateId)).then();
+        return execute("close", closeScript, keys(gateId), List.of()).then();
     }
 
     public Mono<List<String>> admit(UUID gateId, int limit, int capacity, int tokenTtlSeconds) {
@@ -92,9 +96,9 @@ public class RedisQueue {
             if (limit < 1 || capacity < 1 || tokenTtlSeconds < 1) {
                 return Mono.error(new IllegalArgumentException("Admission limits must be positive"));
             }
-            return redis.execute(admitScript, keys(gateId), List.of(Integer.toString(limit),
+            return execute("admit", admitScript, keys(gateId), List.of(Integer.toString(limit),
                             Integer.toString(capacity), Integer.toString(tokenTtlSeconds)))
-                    .single().map(result -> {
+                    .map(result -> {
                         List<?> values = result;
                         return values.stream().map(Object::toString).toList();
                     }).doOnNext(values -> admitted.increment(values.size()));
@@ -123,8 +127,8 @@ public class RedisQueue {
                     : List.of(token, userId.toString(), Integer.toString(sessionTtlSeconds),
                             claims.nonce().toString(), Long.toString(claims.issuedAt().toEpochMilli()),
                             Long.toString(claims.expiresAt().toEpochMilli()));
-            return redis.execute(redeemScript, keys(gateId), arguments)
-                    .single().map(result -> {
+            return execute("redeem", redeemScript, keys(gateId), arguments)
+                    .map(result -> {
                         if (result.size() == 1) {
                             int code = Integer.parseInt(result.getFirst().toString());
                             String message = code == 404 ? "Queue entry not found"
@@ -142,8 +146,8 @@ public class RedisQueue {
             byte[] bytes = new byte[32];
             random.nextBytes(bytes);
             String candidate = gate + ":" + Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
-            return redis.execute(issueSessionScript, keys(gate), List.of(token, userId.toString(), candidate))
-                    .single().flatMap(result -> result.isEmpty()
+            return execute("session.issue", issueSessionScript, keys(gate), List.of(token, userId.toString(), candidate))
+                    .flatMap(result -> result.isEmpty()
                             ? Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND, "Active session not found"))
                             : Mono.just(new QueueSession(result.get(0).toString(),
                                     Long.parseLong(result.get(1).toString()))));
@@ -166,8 +170,8 @@ public class RedisQueue {
             UUID gate = sessionGateId(token);
             List<String> arguments = ttl == null ? List.of(token, userId.toString())
                     : List.of(token, userId.toString(), ttl.toString());
-            return redis.execute(validateSessionScript, keys(gate), arguments)
-                    .single().flatMap(result -> result.isEmpty()
+            return execute(ttl == null ? "session.validate" : "session.heartbeat", validateSessionScript, keys(gate), arguments)
+                    .flatMap(result -> result.isEmpty()
                             ? Mono.error(new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid session"))
                             : Mono.just(new QueueSession(result.get(0).toString(),
                                     Long.parseLong(result.get(1).toString()))));
@@ -196,9 +200,9 @@ public class RedisQueue {
         return Mono.defer(() -> {
             UUID gate = gateId(token);
             UUID session = UUID.fromString(token.substring(token.indexOf(':') + 1));
-            return redis.execute(readAdmissionScript, keys(gate),
+            return execute("admission.claims", readAdmissionScript, keys(gate),
                             List.of(token, userId.toString(), UUID.randomUUID().toString()))
-                    .single().map(result -> {
+                    .map(result -> {
                         if (result.size() == 1) {
                             int code = Integer.parseInt(result.getFirst().toString());
                             throw new ResponseStatusException(HttpStatus.valueOf(code), "Admission is not available");
@@ -223,10 +227,20 @@ public class RedisQueue {
     public Mono<QueueEntry> status(String token, UUID userId) {
         return Mono.defer(() -> {
             UUID gateId = gateId(token);
-            return redis.execute(statusScript, keys(gateId), List.of(token, userId.toString()))
-                    .single().flatMap(result -> result.isEmpty()
+            return execute("status", statusScript, keys(gateId), List.of(token, userId.toString()))
+                    .flatMap(result -> result.isEmpty()
                             ? Mono.error(new ResponseStatusException(HttpStatus.NOT_FOUND, "Queue entry not found"))
                             : Mono.just(entry(result)));
+        });
+    }
+
+    private <T> Mono<T> execute(String operation, RedisScript<T> script, List<String> keys, List<String> arguments) {
+        return Mono.defer(() -> {
+            Timer timer = registry.timer("crowdgate.redis.operation", "operation", operation);
+            Timer.Sample sample = Timer.start(registry);
+            return Mono.defer(() -> redis.execute(script, keys, arguments).single())
+                    .doOnError(error -> registry.counter("crowdgate.redis.errors", "operation", operation).increment())
+                    .doFinally(signal -> sample.stop(timer));
         });
     }
 
