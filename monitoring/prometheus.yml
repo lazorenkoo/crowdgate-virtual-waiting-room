@@ -1,0 +1,16 @@
+global:
+  scrape_interval: 10s
+  scrape_timeout: 5s
+
+scrape_configs:
+  - job_name: crowdgate
+    metrics_path: /actuator/prometheus
+    follow_redirects: false
+    http_headers:
+      X-Admin-Key:
+        files:
+          - /run/secrets/crowdgate_admin_key
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets.json
+        refresh_interval: 10s

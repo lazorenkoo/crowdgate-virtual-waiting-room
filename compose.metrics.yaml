@@ -1,0 +1,24 @@
+name: crowdgate-metrics
+services:
+  prometheus:
+    image: prom/prometheus:v3.11.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    ports:
+      - "127.0.0.1:${CG_PROMETHEUS_PORT:-59090}:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ${CG_METRICS_TARGETS_FILE:-./monitoring/targets.json}:/etc/prometheus/targets.json:ro
+      - type: bind
+        source: ${CG_PROMETHEUS_ADMIN_KEY_FILE:?Set CG_PROMETHEUS_ADMIN_KEY_FILE}
+        target: /run/secrets/crowdgate_admin_key
+        read_only: true
+        bind:
+          create_host_path: false
+      - prometheus_data:/prometheus
+
+volumes:
+  prometheus_data:
