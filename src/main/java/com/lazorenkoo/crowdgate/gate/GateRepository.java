@@ -13,6 +13,9 @@ import java.util.List;
 
 public interface GateRepository extends JpaRepository<Gate, UUID> {
 
+    @Query("select g.id from Gate g where (:after is null or g.id > :after) order by g.id")
+    List<UUID> findMetricGateIds(@Param("after") UUID after, Pageable pageable);
+
     @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
     @Query("select g from Gate g where g.id = :id")
     java.util.Optional<Gate> findForAdmission(@Param("id") UUID id);
