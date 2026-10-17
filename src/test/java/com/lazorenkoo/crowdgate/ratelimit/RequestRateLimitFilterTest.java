@@ -21,6 +21,30 @@ class RequestRateLimitFilterTest {
     private final RequestRateLimitFilter filter = new RequestRateLimitFilter(limiter, 20, 10);
 
     @Test
+    void countsOnlyRejectedRequestsWithBoundedReasonTags() {
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        try {
+            var measured = new RequestRateLimitFilter(limiter, 20, 10, registry);
+            when(limiter.acquire(any(), any(), anyInt(), anyInt())).thenReturn(
+                    Mono.just(0L), Mono.just(1500L), Mono.error(new IllegalStateException()));
+            AtomicInteger calls = new AtomicInteger();
+            for (int i = 0; i < 3; i++) {
+                measured.filter(exchange("/api/v1/queue/token"), ignored -> {
+                    calls.incrementAndGet(); return Mono.empty();
+                }).block();
+            }
+            assertThat(calls).hasValue(1);
+            assertThat(registry.get("crowdgate.rejected").tag("reason", "rate_limit").counter().count())
+                    .isEqualTo(1);
+            assertThat(registry.get("crowdgate.rejected").tag("reason", "redis_unavailable").counter().count())
+                    .isEqualTo(1);
+            assertThat(registry.getMeters()).hasSize(2);
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
     void rejectsExcessRequestsAndFailsClosedOnlyForLimiterErrors() {
         AtomicInteger calls = new AtomicInteger();
         when(limiter.acquire(any(), any(), eq(20), eq(10))).thenReturn(Mono.just(1500L));
