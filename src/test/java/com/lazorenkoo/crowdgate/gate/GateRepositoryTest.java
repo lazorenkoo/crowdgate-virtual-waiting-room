@@ -33,6 +33,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
                 "crowdgate.schedule.enabled=false", "crowdgate.admin.key=test-admin-key",
                 "crowdgate.admission.signing-key=test-signing-key-with-at-least-32-bytes"})
 @Testcontainers
+@org.springframework.boot.test.autoconfigure.actuate.observability.AutoConfigureObservability
 class GateRepositoryTest {
 
     @Container
@@ -74,6 +75,31 @@ class GateRepositoryTest {
     @BeforeEach
     void authenticateClient() {
         client = client.mutate().defaultHeader("X-Admin-Key", "test-admin-key").build();
+    }
+
+    @Test
+    void prometheusRequiresAdminKeyAndExportsRuntimeAndHttpMetrics() {
+        WebTestClient anonymous = client.mutate().defaultHeaders(headers -> headers.remove("X-Admin-Key")).build();
+        anonymous.get().uri("/actuator/prometheus").exchange().expectStatus().isUnauthorized();
+        anonymous.get().uri("/actuator/prometheus").header("X-Admin-Key", "wrong")
+                .exchange().expectStatus().isUnauthorized();
+        client.get().uri("/api/v1/admin/gates").exchange().expectStatus().isOk();
+        client.get().uri("/actuator/prometheus").exchange().expectStatus().isOk()
+                .expectBody(String.class).value(body -> assertThat(body)
+                        .contains("jvm_threads_live_threads", "process_uptime_seconds",
+                                "http_server_requests_seconds_count")
+                        .doesNotContain("test-admin-key", "test-signing-key"));
+    }
+
+    @Test
+    void healthIsMinimalAndOtherManagementEndpointsAreNotExposed() {
+        WebTestClient anonymous = client.mutate().defaultHeaders(headers -> headers.remove("X-Admin-Key")).build();
+        anonymous.get().uri("/actuator/health").exchange().expectStatus().isOk()
+                .expectBody().jsonPath("$.status").isEqualTo("UP")
+                .jsonPath("$.components").doesNotExist().jsonPath("$.details").doesNotExist();
+        for (String endpoint : new String[]{"env", "beans", "configprops"}) {
+            anonymous.get().uri("/actuator/" + endpoint).exchange().expectStatus().isNotFound();
+        }
     }
 
     @Test
