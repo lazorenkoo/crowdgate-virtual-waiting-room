@@ -1,0 +1,52 @@
+{
+  "uid": "crowdgate-queues",
+  "title": "CrowdGate queues",
+  "schemaVersion": 41,
+  "version": 1,
+  "refresh": "10s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Queue and session slots",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "crowdgate-prometheus"
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(crowdgate_queue_size)",
+          "legendFormat": "Waiting"
+        },
+        {
+          "refId": "B",
+          "expr": "max(crowdgate_reserved_slots)",
+          "legendFormat": "Reserved"
+        },
+        {
+          "refId": "C",
+          "expr": "max(crowdgate_active_sessions)",
+          "legendFormat": "Active"
+        }
+      ]
+    }
+  ]
+}
