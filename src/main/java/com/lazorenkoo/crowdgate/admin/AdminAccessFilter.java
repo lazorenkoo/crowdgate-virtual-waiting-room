@@ -27,7 +27,9 @@ public class AdminAccessFilter implements WebFilter {
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
         String path = exchange.getRequest().getPath().pathWithinApplication().value();
-        if (!path.equals("/api/v1/admin") && !path.startsWith("/api/v1/admin/")) {
+        boolean protectedPath = path.equals("/api/v1/admin") || path.startsWith("/api/v1/admin/")
+                || path.equals("/actuator/prometheus") || path.startsWith("/actuator/prometheus/");
+        if (!protectedPath) {
             return chain.filter(exchange);
         }
         String provided = exchange.getRequest().getHeaders().getFirst("X-Admin-Key");
