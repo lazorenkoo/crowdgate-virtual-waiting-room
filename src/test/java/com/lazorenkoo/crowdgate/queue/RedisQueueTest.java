@@ -43,6 +43,34 @@ class RedisQueueTest {
     }
 
     @Test
+    void countsSuccessfulJoinRequestsAndActualAdmissionsWithoutIdentityTags() {
+        var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        try {
+            RedisQueue measured = new RedisQueue(template, registry);
+            UUID gate = UUID.randomUUID();
+            UUID owner = UUID.randomUUID();
+            QueueEntry first = measured.join(gate, owner).block(Duration.ofSeconds(5));
+            QueueEntry repeated = measured.join(gate, owner).block(Duration.ofSeconds(5));
+            assertThat(repeated.queueToken()).isEqualTo(first.queueToken());
+            assertThat(repeated.queueSize()).isEqualTo(1);
+            measured.join(gate, UUID.randomUUID()).block(Duration.ofSeconds(5));
+            assertThat(registry.get("crowdgate.join").counter().count()).isEqualTo(3);
+            assertThat(measured.admit(gate, 10, 1, 60).block(Duration.ofSeconds(5))).hasSize(1);
+            assertThat(measured.admit(gate, 10, 1, 60).block(Duration.ofSeconds(5))).isEmpty();
+            assertThat(registry.get("crowdgate.admitted").counter().count()).isEqualTo(1);
+            measured.close(gate).block(Duration.ofSeconds(5));
+            assertThatThrownBy(() -> measured.join(gate, UUID.randomUUID()).block(Duration.ofSeconds(5)))
+                    .isInstanceOf(ResponseStatusException.class);
+            assertThat(registry.get("crowdgate.join").counter().count()).isEqualTo(3);
+            assertThat(measured.admit(gate, 10, 1, 60).block(Duration.ofSeconds(5))).isEmpty();
+            assertThat(registry.get("crowdgate.admitted").counter().count()).isEqualTo(1);
+            assertThat(registry.getMeters()).allSatisfy(meter -> assertThat(meter.getId().getTags()).isEmpty());
+        } finally {
+            registry.close();
+        }
+    }
+
+    @Test
     void signedRedemptionRejectsAlteredClaimsWithoutChangingAdmission() {
         UUID gate = UUID.randomUUID();
         UUID user = UUID.randomUUID();
