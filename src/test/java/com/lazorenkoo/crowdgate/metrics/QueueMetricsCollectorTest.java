@@ -31,7 +31,7 @@ class QueueMetricsCollectorTest {
             when(repository.findMetricGateIds(page.getLast(), PageRequest.of(0, 25)))
                     .thenReturn(List.of(UUID.randomUUID()));
             when(redis.execute(any(RedisScript.class), anyList()))
-                    .thenReturn(Flux.just(List.of(2L, 3L, 4L, 0L, 0L)));
+                    .thenReturn(Flux.just(List.of(2L, 3L, 4L, 5L, 6L)));
             collector.collect();
             assertThat(registry.get("crowdgate.queue.size").gauge().value()).isNaN();
             collector.collect();
@@ -39,6 +39,9 @@ class QueueMetricsCollectorTest {
             assertThat(registry.get("crowdgate.queue.size").gauge().value()).isEqualTo(52);
             assertThat(registry.get("crowdgate.reserved.slots").gauge().value()).isEqualTo(78);
             assertThat(registry.get("crowdgate.active.sessions").gauge().value()).isEqualTo(104);
+            assertThat(registry.get("crowdgate.admission.expired").functionCounter().count()).isEqualTo(130);
+            assertThat(registry.get("crowdgate.session.expired").functionCounter().count()).isEqualTo(156);
+            assertThat(registry.get("crowdgate.session.expired").functionCounter().count()).isEqualTo(156);
             assertThat(registry.get("crowdgate.metrics.snapshot.age").gauge().value()).isGreaterThanOrEqualTo(0);
             verifyNoInteractions(redis, repository);
         } finally {
@@ -54,15 +57,19 @@ class QueueMetricsCollectorTest {
             when(repository.findMetricGateIds(null, PageRequest.of(0, 25)))
                     .thenReturn(List.of(UUID.randomUUID()), List.of(UUID.randomUUID()), List.of());
             when(redis.execute(any(RedisScript.class), anyList()))
-                    .thenReturn(Flux.just(List.of(7L, 2L, 1L, 0L, 0L)), Flux.error(new IllegalStateException()));
+                    .thenReturn(Flux.just(List.of(7L, 2L, 1L, 9L, 11L)), Flux.error(new IllegalStateException()));
             collector.collect();
             collector.collect();
             assertThat(registry.get("crowdgate.queue.size").gauge().value()).isEqualTo(7);
             assertThat(registry.get("crowdgate.metrics.collection.errors").counter().count()).isEqualTo(1);
+            assertThat(registry.get("crowdgate.admission.expired").functionCounter().count()).isEqualTo(9);
+            assertThat(registry.get("crowdgate.session.expired").functionCounter().count()).isEqualTo(11);
             collector.collect();
             assertThat(registry.get("crowdgate.queue.size").gauge().value()).isZero();
             assertThat(registry.get("crowdgate.reserved.slots").gauge().value()).isZero();
             assertThat(registry.get("crowdgate.active.sessions").gauge().value()).isZero();
+            assertThat(registry.get("crowdgate.admission.expired").functionCounter().count()).isZero();
+            assertThat(registry.get("crowdgate.session.expired").functionCounter().count()).isZero();
             verify(repository, times(3)).findMetricGateIds(null, PageRequest.of(0, 25));
         } finally {
             registry.close();

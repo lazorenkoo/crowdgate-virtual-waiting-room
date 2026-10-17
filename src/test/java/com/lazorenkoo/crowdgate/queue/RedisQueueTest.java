@@ -43,6 +43,79 @@ class RedisQueueTest {
     }
 
     @Test
+    void concurrentExpiryAcrossInstancesIncrementsTheSessionCounterOnce() {
+        UUID gate = UUID.randomUUID();
+        UUID owner = UUID.randomUUID();
+        QueueEntry entry = queue.join(gate, owner).block(Duration.ofSeconds(5));
+        queue.admit(gate, 10, 10, 60).block(Duration.ofSeconds(5));
+        queue.redeem(entry.queueToken(), owner, 60).block(Duration.ofSeconds(5));
+        String prefix = "cg:{" + gate + "}:";
+        template.opsForZSet().add(prefix + "active", entry.queueToken(), 0).block(Duration.ofSeconds(5));
+        RedisQueue second = new RedisQueue(template);
+        var results = Flux.range(0, 100).flatMap(index -> (index % 2 == 0 ? queue : second)
+                        .status(entry.queueToken(), owner), 16)
+                .collectList().block(Duration.ofSeconds(5));
+        assertThat(results).hasSize(100).allSatisfy(value -> assertThat(value.status()).isEqualTo("EXPIRED"));
+        assertThat(template.opsForHash().get(prefix + "metrics", "sessions-expired")
+                .block(Duration.ofSeconds(5))).isEqualTo("1");
+        assertThat(template.opsForHash().size(prefix + "metrics").block(Duration.ofSeconds(5))).isEqualTo(1);
+        assertThat(template.opsForZSet().size(prefix + "active").block(Duration.ofSeconds(5))).isZero();
+    }
+
+    @Test
+    void expiryCountersCountEachTransitionOnceAcrossAllCleanupPaths() {
+        for (String state : new String[]{"ADMITTED", "ACTIVE"}) {
+            for (String path : new String[]{"admit", "status", "join", "redeem"}) {
+                UUID gate = UUID.randomUUID();
+                UUID owner = UUID.randomUUID();
+                QueueEntry entry = queue.join(gate, owner).block(Duration.ofSeconds(5));
+                queue.admit(gate, 10, 10, 60).block(Duration.ofSeconds(5));
+                if (state.equals("ACTIVE")) {
+                    queue.redeem(entry.queueToken(), owner, 60).block(Duration.ofSeconds(5));
+                }
+                String prefix = "cg:{" + gate + "}:";
+                String expiryKey = state.equals("ACTIVE") ? "active" : "reservations";
+                template.opsForZSet().add(prefix + expiryKey, entry.queueToken(), 0).block(Duration.ofSeconds(5));
+                assertThatThrownBy(() -> queue.status(entry.queueToken(), UUID.randomUUID())
+                        .block(Duration.ofSeconds(5))).isInstanceOf(ResponseStatusException.class);
+                assertThat(template.opsForHash().size(prefix + "metrics").block(Duration.ofSeconds(5))).isZero();
+                switch (path) {
+                    case "admit" -> queue.admit(gate, 10, 10, 60).block(Duration.ofSeconds(5));
+                    case "status" -> queue.status(entry.queueToken(), owner).block(Duration.ofSeconds(5));
+                    case "join" -> queue.join(gate, owner).block(Duration.ofSeconds(5));
+                    case "redeem" -> assertThatThrownBy(() -> queue.redeem(entry.queueToken(), owner, 60)
+                            .block(Duration.ofSeconds(5))).isInstanceOfSatisfying(ResponseStatusException.class,
+                            error -> assertThat(error.getStatusCode().value()).isEqualTo(409));
+                }
+                queue.status(entry.queueToken(), owner).block(Duration.ofSeconds(5));
+                queue.status(entry.queueToken(), owner).block(Duration.ofSeconds(5));
+                queue.admit(gate, 10, 10, 60).block(Duration.ofSeconds(5));
+                String field = state.equals("ACTIVE") ? "sessions-expired" : "admissions-expired";
+                assertThat(template.opsForHash().get(prefix + "metrics", field).block(Duration.ofSeconds(5)))
+                        .isEqualTo("1");
+                assertThat(template.opsForHash().size(prefix + "metrics").block(Duration.ofSeconds(5))).isEqualTo(1);
+            }
+        }
+    }
+
+    @Test
+    void closingGateDoesNotCountCancellationOrLiveSessionAsExpiry() {
+        UUID gate = UUID.randomUUID();
+        UUID activeOwner = UUID.randomUUID();
+        UUID reservedOwner = UUID.randomUUID();
+        QueueEntry active = queue.join(gate, activeOwner).block(Duration.ofSeconds(5));
+        QueueEntry reserved = queue.join(gate, reservedOwner).block(Duration.ofSeconds(5));
+        queue.admit(gate, 10, 10, 60).block(Duration.ofSeconds(5));
+        queue.redeem(active.queueToken(), activeOwner, 60).block(Duration.ofSeconds(5));
+        queue.close(gate).block(Duration.ofSeconds(5));
+        assertThat(queue.status(active.queueToken(), activeOwner).block(Duration.ofSeconds(5)).status())
+                .isEqualTo("ACTIVE");
+        assertThat(queue.status(reserved.queueToken(), reservedOwner).block(Duration.ofSeconds(5)).status())
+                .isEqualTo("CANCELLED");
+        assertThat(template.opsForHash().size("cg:{" + gate + "}:metrics").block(Duration.ofSeconds(5))).isZero();
+    }
+
+    @Test
     void countsSuccessfulJoinRequestsAndActualAdmissionsWithoutIdentityTags() {
         var registry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
         try {
