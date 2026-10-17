@@ -11,6 +11,7 @@ for _, token in ipairs(expiredActive) do
         redis.call('HDEL', KEYS[10], token)
     end
     if redis.call('HGET', KEYS[3], token) == 'ACTIVE' then
+        redis.call('HINCRBY', KEYS[15], 'sessions-expired', 1)
         redis.call('HSET', KEYS[3], token, 'EXPIRED')
     end
     redis.call('ZREM', KEYS[9], token)
@@ -19,6 +20,7 @@ local expired = redis.call('ZRANGEBYSCORE', KEYS[7], '-inf', now, 'LIMIT', 0, 10
 for _, token in ipairs(expired) do
     local status = redis.call('HGET', KEYS[3], token)
     if status == 'ADMITTED' then
+        redis.call('HINCRBY', KEYS[15], 'admissions-expired', 1)
         redis.call('HSET', KEYS[3], token, 'EXPIRED')
     end
     if status ~= 'ACTIVE' then

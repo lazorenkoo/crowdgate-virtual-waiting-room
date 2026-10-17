@@ -221,7 +221,7 @@ public class RedisQueue {
                 prefix + "owners", prefix + "sequence", prefix + "closed", prefix + "reservations",
                 prefix + "admission-window", prefix + "active", prefix + "sessions-by-entry",
                 prefix + "session-entries", prefix + "admission-issued-at", prefix + "admission-nonces",
-                prefix + "admission-expires-at");
+                prefix + "admission-expires-at", prefix + "metrics");
     }
 
     public Mono<QueueEntry> status(String token, UUID userId) {

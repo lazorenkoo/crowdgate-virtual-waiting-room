@@ -31,7 +31,7 @@ class QueueMetricsCollectorTest {
             when(repository.findMetricGateIds(page.getLast(), PageRequest.of(0, 25)))
                     .thenReturn(List.of(UUID.randomUUID()));
             when(redis.execute(any(RedisScript.class), anyList()))
-                    .thenReturn(Flux.just(List.of(2L, 3L, 4L)));
+                    .thenReturn(Flux.just(List.of(2L, 3L, 4L, 0L, 0L)));
             collector.collect();
             assertThat(registry.get("crowdgate.queue.size").gauge().value()).isNaN();
             collector.collect();
@@ -54,7 +54,7 @@ class QueueMetricsCollectorTest {
             when(repository.findMetricGateIds(null, PageRequest.of(0, 25)))
                     .thenReturn(List.of(UUID.randomUUID()), List.of(UUID.randomUUID()), List.of());
             when(redis.execute(any(RedisScript.class), anyList()))
-                    .thenReturn(Flux.just(List.of(7L, 2L, 1L)), Flux.error(new IllegalStateException()));
+                    .thenReturn(Flux.just(List.of(7L, 2L, 1L, 0L, 0L)), Flux.error(new IllegalStateException()));
             collector.collect();
             collector.collect();
             assertThat(registry.get("crowdgate.queue.size").gauge().value()).isEqualTo(7);

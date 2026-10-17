@@ -9,6 +9,8 @@ if status == 'ADMITTED' or status == 'ACTIVE' then
     local time = redis.call('TIME')
     local now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
     if expires and tonumber(expires) <= now then
+        local metric = status == 'ACTIVE' and 'sessions-expired' or 'admissions-expired'
+        redis.call('HINCRBY', KEYS[15], metric, 1)
         status = 'EXPIRED'
         redis.call('HSET', KEYS[3], token, status)
         redis.call('ZREM', expiryKey, token)

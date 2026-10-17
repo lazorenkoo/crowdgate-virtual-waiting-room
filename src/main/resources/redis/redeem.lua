@@ -14,6 +14,7 @@ end
 if status == 'ACTIVE' then
     local expires = redis.call('ZSCORE', KEYS[9], token)
     if not expires or tonumber(expires) <= now then
+        redis.call('HINCRBY', KEYS[15], 'sessions-expired', 1)
         redis.call('HSET', KEYS[3], token, 'EXPIRED')
         redis.call('ZREM', KEYS[9], token)
         local credential = redis.call('HGET', KEYS[10], token)
@@ -32,6 +33,7 @@ else
     end
     local expires = redis.call('ZSCORE', KEYS[7], token)
     if not expires or tonumber(expires) <= now then
+        redis.call('HINCRBY', KEYS[15], 'admissions-expired', 1)
         redis.call('HSET', KEYS[3], token, 'EXPIRED')
         redis.call('ZREM', KEYS[7], token)
         return {'409'}
