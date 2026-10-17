@@ -1,6 +1,10 @@
 package com.lazorenkoo.crowdgate.queue;
 
 import com.lazorenkoo.crowdgate.token.AdmissionClaims;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Metrics;
+import org.springframework.beans.factory.annotation.Autowired;
 
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.ReactiveStringRedisTemplate;
@@ -29,9 +33,20 @@ public class RedisQueue {
     private final DefaultRedisScript<List> validateSessionScript;
     private final DefaultRedisScript<List> readAdmissionScript;
     private final SecureRandom random = new SecureRandom();
+    private final Counter joins;
+    private final Counter admitted;
 
     public RedisQueue(ReactiveStringRedisTemplate redis) {
+        this(redis, Metrics.globalRegistry);
+    }
+
+    @Autowired
+    public RedisQueue(ReactiveStringRedisTemplate redis, MeterRegistry registry) {
         this.redis = redis;
+        joins = Counter.builder("crowdgate.join").description("Successful join requests, including retries")
+                .register(registry);
+        admitted = Counter.builder("crowdgate.admitted").description("Queue entries admitted by this instance")
+                .register(registry);
         joinScript = new DefaultRedisScript<>();
         joinScript.setLocation(new ClassPathResource("redis/join.lua"));
         joinScript.setResultType(List.class);
@@ -64,7 +79,7 @@ public class RedisQueue {
             return redis.execute(joinScript, keys(gateId), List.of(userId.toString(), token))
                     .single().flatMap(result -> result.isEmpty()
                             ? Mono.error(new ResponseStatusException(HttpStatus.GONE, "Gate is closed"))
-                            : Mono.just(entry(result)));
+                            : Mono.just(entry(result))).doOnNext(value -> joins.increment());
         });
     }
 
@@ -82,7 +97,7 @@ public class RedisQueue {
                     .single().map(result -> {
                         List<?> values = result;
                         return values.stream().map(Object::toString).toList();
-                    });
+                    }).doOnNext(values -> admitted.increment(values.size()));
         });
     }
 
