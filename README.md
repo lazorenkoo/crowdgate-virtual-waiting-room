@@ -1,6 +1,7 @@
 # CrowdGate
 
 This README has two parts:
+
 1. [Project overview](#1-project-overview): purpose, technologies, integration and setup.
 2. [Testing](#2-testing): measured results, charts and limitations.
 
@@ -67,7 +68,7 @@ GitHub Actions runs both test suites and builds both container images. The last 
 
 ## 2. Testing
 
-Local measurements: **18 October 2026**. Detailed charts and raw reports are retained locally and are not included in this repository. Production code was not changed for these measurements.
+Local measurements: **18 October 2026**. Charts are included below; raw JSON/CSV reports are retained locally. Production code was not changed for these measurements.
 
 ### Test environment
 
@@ -99,6 +100,10 @@ All requested iterations completed. Repeated joins kept the same entry; owners, 
 
 **100,000 queue entries does not mean 100,000 concurrent clients.** Each stage ran once, in a fixed order with increasing JVM warm-up. Lower latency in later runs does not prove that larger queues improve performance. Join latency is k6 request duration, excluding blocked/DNS/connect time; RPS includes joins, retries and status requests.
 
+![Queue join latency at each tested load](reports/2026-10-18/queue-latency.png)
+
+![Queue throughput and application memory](reports/2026-10-18/queue-throughput-memory.png)
+
 ### Signed tokens and sessions
 
 A separate run used 100 VUs and 1,000 iterations: admission → token issuance → repeated issuance → tampered-token rejection → redeem → session validation → repeated redeem → heartbeat → expiry.
@@ -107,6 +112,8 @@ A separate run used 100 VUs and 1,000 iterations: admission → token issuance �
 - Repeated issuance preserved the token and expiry; repeated redemption did not extend session TTL.
 - The maximum sampled ADMITTED + ACTIVE count was **100 / 100** across 64 snapshots. Recorded admissions never exceeded 100 in one calendar second.
 - With session TTL=5 s, all 1,000 entries eventually became EXPIRED; no reservations or active sessions remained after the final wait.
+
+![Reserved and active sessions during the signed-token lifecycle test](reports/2026-10-18/session-capacity.png)
 
 ### SSE connections
 
@@ -123,6 +130,8 @@ First-event timing excludes time waiting in the generator's handshake semaphore.
 
 A separate **5,000-connection full-lifetime run** had no opening or read errors. All HTTP streams completed normally after **299.821–300.039 s**, matching the five-minute endpoint limit. Sampled peak application memory was **852.6 MiB / 1024 MiB**, with no OOM or container restarts. This was one lifecycle, not a multi-hour soak or browser reconnect test.
 
+![SSE connections and first-event latency](reports/2026-10-18/sse-connections.png)
+
 ### Dependency failures
 
 | Failure | Queue status | Join | Recovery observation |
@@ -135,6 +144,10 @@ Closing a gate while Redis was down returned 503, but CLOSED persisted in Postgr
 
 **Known issue:** database unavailability causes a long join wait and a generic 500. A shorter failure timeout and a controlled 503 are the first improvement priority. These probes covered one waiting identity and controlled local failures, not every network race or data-loss scenario.
 
+### Resource usage
+
+![Container CPU and memory across test phases](reports/2026-10-18/resources.png)
+
 CPU percentages are converted to logical cores; memory includes more than Java heap. Gaps indicate missing samples or a fresh container. Generator and host resource limits can affect latency; these charts do not establish maximum service capacity.
 
 ### Limits and evidence
@@ -144,4 +157,4 @@ CPU percentages are converted to logical cores; memory includes more than Java h
 - Demo sessions are held in memory and require sticky routing across instances; local token checks cannot immediately revoke an otherwise valid token.
 - Fixed-order, closed-model runs without independent repeats or confidence intervals are not an SLA or production-readiness guarantee.
 
-Raw JSON/CSV measurements, environment details, image digest, charts and the additional full-session scenario are retained in the local test report. Queue load uses [load-tests/queue.js](load-tests/queue.js) with POLL_ATTEMPTS=1 and an explicit large-load opt-in.
+The five charts above are versioned with this README. Raw JSON/CSV measurements, environment details, image digest and the additional full-session scenario are retained in the local test report. Queue load uses [load-tests/queue.js](load-tests/queue.js) with POLL_ATTEMPTS=1 and an explicit large-load opt-in.
