@@ -7,7 +7,11 @@ This README has two parts:
 
 ## 1. Project overview
 
-CrowdGate is a self-hosted virtual waiting room for applications with limited capacity. It queues visitors and admits them at a configured rate while limiting the number of reserved and active sessions. It provides an HTTP API that can be integrated into an existing web application.
+CrowdGate is a self-hosted virtual waiting room that protects web applications from traffic spikes. Instead of allowing every visitor to reach a limited-capacity service at once, it places visitors in a FIFO queue and grants access at a controlled rate.
+
+It can be integrated into ticket sales, product launches, registration systems and other applications where demand may exceed available capacity. Each gate defines an admission rate, a maximum number of active sessions and access time limits.
+
+Visitors receive live queue updates and a signed admission token when their turn arrives. The protected application verifies the token and activates access through CrowdGate once. Subsequent requests are checked locally, so CrowdGate does not sit in the path of every application request.
 
 ### Features and stack
 
