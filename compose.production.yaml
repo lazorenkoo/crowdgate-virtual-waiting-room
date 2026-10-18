@@ -1,0 +1,83 @@
+name: crowdgate
+services:
+  crowdgate:
+    build:
+      context: .
+      target: crowdgate
+    image: crowdgate:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${CG_HTTP_PORT:-8080}:8080"
+    environment:
+      CG_DATABASE_URL: jdbc:postgresql://postgres:5432/crowdgate
+      CG_DATABASE_USER: crowdgate
+      CG_DATABASE_PASSWORD: ${CG_DATABASE_PASSWORD:?Set CG_DATABASE_PASSWORD}
+      CG_REDIS_HOST: redis
+      CG_REDIS_PORT: 6379
+      CG_ADMIN_KEY: ${CG_ADMIN_KEY:?Set CG_ADMIN_KEY}
+      CG_ADMISSION_SIGNING_KEY: ${CG_ADMISSION_SIGNING_KEY:?Set CG_ADMISSION_SIGNING_KEY}
+      CG_REQUEST_BURST: ${CG_REQUEST_BURST:-20}
+      CG_REQUEST_REFILL: ${CG_REQUEST_REFILL:-10}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:8080/actuator/health]
+      interval: 10s
+      timeout: 3s
+      start_period: 30s
+      retries: 5
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  demo:
+    profiles: [demo]
+    build:
+      context: .
+      target: demo
+    image: crowdgate-demo:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${CG_DEMO_PORT:-58081}:58081"
+    environment:
+      CG_ADMISSION_SIGNING_KEY: ${CG_ADMISSION_SIGNING_KEY:?Set CG_ADMISSION_SIGNING_KEY}
+      CG_DEMO_GATE_ID: ${CG_DEMO_GATE_ID:-}
+      CG_DEMO_CROWDGATE_URL: http://crowdgate:8080
+    depends_on:
+      crowdgate:
+        condition: service_healthy
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: crowdgate
+      POSTGRES_USER: crowdgate
+      POSTGRES_PASSWORD: ${CG_DATABASE_PASSWORD:?Set CG_DATABASE_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U crowdgate -d crowdgate]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  redis:
+    image: redis:7.4-alpine
+    command: [redis-server, --appendonly, "yes"]
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+volumes:
+  postgres_data:
+  redis_data:
