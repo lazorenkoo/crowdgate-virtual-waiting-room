@@ -1,0 +1,17 @@
+name: crowdgate-load
+services:
+  k6:
+    image: grafana/k6:1.3.0
+    command: [run, --no-usage-report, /scripts/queue.js]
+    volumes:
+      - ./load-tests:/scripts:ro
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    environment:
+      BASE_URL: ${CG_LOAD_BASE_URL:-http://host.docker.internal:8080}
+      GATE_ID: ${CG_LOAD_GATE_ID:?Set CG_LOAD_GATE_ID}
+      VUS: ${CG_LOAD_VUS:-2}
+      ITERATIONS: ${CG_LOAD_ITERATIONS:-10}
+      POLL_ATTEMPTS: ${CG_LOAD_POLL_ATTEMPTS:-8}
+      ALLOW_LARGE_LOAD: ${CG_LOAD_ALLOW_LARGE_LOAD:-false}
+      MAX_DURATION: ${CG_LOAD_MAX_DURATION:-2m}
