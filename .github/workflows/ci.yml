@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+          cache-dependency-path: |
+            pom.xml
+            demo-backend/pom.xml
+      - name: Verify Docker availability
+        run: docker info
+      - name: Test and install CrowdGate and token library
+        run: bash ./mvnw -B -ntp install
+      - name: Test the standalone demo
+        run: bash ./mvnw -B -ntp -f demo-backend/pom.xml verify
+      - name: Build CrowdGate image
+        run: docker build --target crowdgate -t crowdgate:ci .
+      - name: Build demo image
+        run: docker build --target demo -t crowdgate-demo:ci .
